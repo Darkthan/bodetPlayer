@@ -2,6 +2,7 @@ const $ = id => document.getElementById(id);
 let socket, context, stream, processor, running = false, busy = false;
 let networkDirty = false;
 let audioDirty = false;
+let agentsSignature = '';
 let youtubeSignature = '';
 let librarySignature = '', draftQueue = [], musicStatus = null, draggedTrack = null, ordering = false;
 let selectedSounds = new Set(), playlistsSignature = '', selectedPlaylist = '';
@@ -61,6 +62,7 @@ async function refresh() {
     $('start').disabled = !!status.active || busy || uploading;
     $('playYoutube').disabled = !!status.active || busy || uploading;
     $('file').disabled = !!status.active || uploading;
+    renderAgents(status);
     renderYouTube(status);
   } catch (error) {
     $('login').hidden = false; $('dashboard').hidden = true;
@@ -192,6 +194,42 @@ function renderYouTube(status) {
   $('addSelectedSounds').disabled = !!status.active || !selectedSounds.size;
   $('deleteSelectedSounds').disabled = !!status.active || !selectedSounds.size;
 }
+function renderAgents(status) {
+  const agents = status.agents || [];
+  const signature = JSON.stringify(agents);
+  if (signature !== agentsSignature) {
+    agentsSignature = signature;
+    const previous = $('windowsAgent').value;
+    $('windowsAgent').replaceChildren(new Option('Choisissez un PC Windows connecté', ''));
+    agents.forEach(agent => $('windowsAgent').append(new Option(`${agent.name} — ${agent.online ? 'connecté' : 'hors ligne'}`, agent.id)));
+    if (agents.some(agent => agent.id === previous)) $('windowsAgent').value = previous;
+    else if (agents.filter(agent => agent.online).length === 1) $('windowsAgent').value = agents.find(agent => agent.online).id;
+    $('agentList').replaceChildren();
+    agents.forEach(agent => {
+      const row = document.createElement('div'); row.className = 'zone-row';
+      const label = document.createElement('span');
+      label.textContent = `${agent.name} · ${agent.online ? (agent.status === 'capturing' ? 'Capture en cours' : 'Connecté') : 'Hors ligne'}${agent.error ? ' · ' + agent.error : ''}`;
+      const revoke = document.createElement('button'); revoke.type = 'button'; revoke.className = 'secondary';
+      revoke.textContent = 'Retirer'; revoke.setAttribute('aria-label', `Retirer l’agent ${agent.name}`);
+      revoke.onclick = async () => {
+        if (!confirm(`Retirer l’agent « ${agent.name} » et arrêter sa capture éventuelle ?`)) return;
+        try { await api(`agents/${agent.id}`, {}, 'DELETE'); message('Agent retiré.'); }
+        catch (error) { message(error.message); }
+        await refresh();
+      };
+      row.append(label, revoke); $('agentList').append(row);
+    });
+  }
+  $('windowsAgent').disabled = !!status.active;
+  const source = document.querySelector('input[name=source]:checked').value;
+  $('agentSettings').hidden = source !== 'agent' && status.active?.kind !== 'agent';
+}
+$('pairWindowsAgent').onclick = async () => {
+  try {
+    const result = await api('agents/pairing', {});
+    $('agentPairCode').textContent = `Adresse du serveur : ${location.origin} · Code : ${result.code} · Valable 5 minutes, utilisable une seule fois.`;
+  } catch (error) { message(error.message); }
+};
 function renderPlaylists(status) {
   const playlists = status.playlists || [];
   if (selectedPlaylist && !playlists.some(p => p.id === selectedPlaylist)) {
@@ -375,6 +413,8 @@ document.querySelectorAll('input[name=source]').forEach(input => input.onchange 
   const source = document.querySelector('input[name=source]:checked').value;
   $('youtubeSettings').hidden = source !== 'library';
   $('captureHint').hidden = source === 'library';
+  $('agentSettings').hidden = source !== 'agent';
+  if (source === 'agent') $('captureHint').hidden = true;
   $('captureHint').textContent = source === 'mic'
     ? 'Autorisez le microphone pour diffuser votre voix.'
     : 'Dans Chrome ou Edge, choisissez un onglet et cochez « Partager l’audio de l’onglet ». Firefox ne permet pas cette capture ; utilisez la playlist pour YouTube.';
@@ -447,6 +487,11 @@ $('start').onclick = async () => {
     const zones = [...$('zones').querySelectorAll('input:checked')].map(input => Number(input.value));
     if (!zones.length) throw new Error('Sélectionnez au moins une zone.');
     const source = document.querySelector('input[name=source]:checked').value;
+    if (source === 'agent') {
+      if (!$('windowsAgent').value) throw new Error('Choisissez un agent Windows connecté.');
+      await api(`agents/${$('windowsAgent').value}/start`, {zones});
+      busy = false; await refresh(); return;
+    }
     if (source === 'library') {
       if (!draftQueue.length) throw new Error('Ajoutez au moins une piste de la bibliothèque à la file.');
       await api('library/start', {tracks:draftQueue.map(track => track.id), zones, loop:$('youtubeLoop').value});

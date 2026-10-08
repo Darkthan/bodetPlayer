@@ -12,6 +12,7 @@ const assert = require('node:assert/strict');
     page.on('pageerror', error => errors.push(error.message));
     const state = {mode:'simulation', zones:[{id:1, name:'Salle'}], active:null,
       multicast_address:'239.1.2.3', youtube:null, audio:{block_ms:20, max_backlog_ms:200},
+      agents:[{id:'pc1', name:'PC musique', online:true, status:'idle', error:''}],
       playlists:[], library:[{id:'abcdefghijk', title:'Première chanson', size:1000},
                {id:'12345678901', title:'Deuxième chanson', size:2000}]};
     await page.route('**/*', async route => {
@@ -24,7 +25,14 @@ const assert = require('node:assert/strict');
           state.library.push(track);
           await route.fulfill({json:track}); return;
         }
-        if (url.pathname === '/api/settings/audio') {
+        if (url.pathname === '/api/agents/pairing') {
+          await route.fulfill({json:{code:'0123456789ABCDEF', expires_in:300}}); return;
+        } else if (url.pathname === '/api/agents/pc1/start') {
+          state.active = {kind:'agent', agent_id:'pc1', source:'PC musique', zones:body.zones, bytes:96000};
+          state.agents[0].status = 'capturing';
+        } else if (url.pathname === '/api/agents/pc1' && request.method() === 'DELETE') {
+          state.agents = [];
+        } else if (url.pathname === '/api/settings/audio') {
           state.audio = body;
           await route.fulfill({json:body}); return;
         } else if (url.pathname === '/api/playlists') {
@@ -64,7 +72,7 @@ const assert = require('node:assert/strict');
       }
     });
     await page.goto('http://bodet-ui.test/');
-    assert.equal(await page.locator('input[name=source]').count(), 3);
+    assert.equal(await page.locator('input[name=source]').count(), 4);
     assert.equal(await page.evaluate(() => window.isSecureContext), false);
     await page.locator('#settingsButton').click();
     await page.locator('#audioFast').click();
@@ -149,6 +157,18 @@ const assert = require('node:assert/strict');
     await page.locator('#deletePlaylist').click();
     await page.waitForFunction(() => document.querySelector('#savedPlaylist').options.length === 1);
     assert.equal(state.library.length, 1);
+    await page.locator('input[name=source][value=agent]').check();
+    await page.locator('#pairWindowsAgent').click();
+    await page.locator('#agentPairCode').filter({hasText:'0123456789ABCDEF'}).waitFor();
+    assert.equal(await page.locator('.download-agent').getAttribute('href'), '/api/agents/download');
+    await page.locator('#start').click();
+    await page.locator('#activity').filter({hasText:'PC musique'}).waitFor();
+    assert.equal(state.active.kind, 'agent');
+    await page.locator('#stop').click();
+    await page.waitForFunction(() => document.querySelector('#start').disabled === false);
+    await page.getByRole('button', {name:'Retirer l’agent PC musique', exact:true}).click();
+    await page.waitForFunction(() => document.querySelector('#windowsAgent').options.length === 1);
+    assert.deepEqual(state.agents, []);
     assert.deepEqual(errors, []);
     console.log('UI passed: HTTP playback, library, draft/live reorder, drag/drop, repeat, navigation, stop, delete, mobile layout.');
   } finally {

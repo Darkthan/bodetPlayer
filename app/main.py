@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StrictInt
 from app.youtube import Library, YouTubePlayer, youtube_url, MAX_FILE_BYTES, MAX_LIBRARY_BYTES, spawn, terminate
 from app.audio import audio_settings
+from app.agents import AgentRegistry
 
 STATIC = Path(__file__).parent / "static"
 CONFIG = json.loads(Path(os.getenv("PLAYER_CONFIG", "config/player.json")).read_text(encoding="utf-8"))
@@ -109,6 +110,7 @@ def load_audio():
 
 
 AUDIO = load_audio()
+AGENTS = AgentRegistry(lambda: SETTINGS_PATH)
 
 
 def valid(token):
@@ -152,6 +154,15 @@ class NetworkSettings(BaseModel):
 class AudioSettings(BaseModel):
     block_ms: StrictInt = Field(ge=10, le=100)
     max_backlog_ms: StrictInt = Field(ge=40, le=1000)
+
+
+class AgentPair(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=80)
+
+
+class AgentStart(BaseModel):
+    zones: list[StrictInt] = Field(min_length=1, max_length=100)
 
 
 class ZoneSettings(BaseModel):
@@ -261,6 +272,7 @@ async def status(request: Request):
             "youtube": youtube_player.snapshot() if youtube_player else None,
             "library": audio_library().list(),
             "playlists": saved_playlists(),
+            "agents": AGENTS.snapshot(),
             "audio": {"block_ms": AUDIO["block_ms"], "max_backlog_ms": AUDIO["max_backlog_ms"]}}
 
 
@@ -563,6 +575,132 @@ async def delete_zone(zone_id: int, request: Request):
     return await change_zone(request, original_id=zone_id)
 
 
+@app.get("/api/agents/download")
+async def download_agent(request: Request):
+    authorize(request)
+    path = Path(os.getenv("PLAYER_AGENT_DOWNLOAD", str(Path(__file__).parent / "downloads" / "BodetAgent.exe")))
+    if not path.is_file():
+        raise HTTPException(503, "Reconstruisez l’image Docker pour inclure l’agent Windows.")
+    return FileResponse(path, filename="BodetAgent.exe", media_type="application/octet-stream")
+
+
+@app.post("/api/agents/pairing")
+async def pairing_code(request: Request):
+    same_origin(request)
+    authorize(request)
+    async with lock:
+        return AGENTS.code()
+
+
+@app.post("/api/agents/pair")
+async def pair_agent(body: AgentPair):
+    # Native clients have no browser cookie. The random one-time code is their credential.
+    async with lock:
+        return AGENTS.pair(body.code, body.name)
+
+
+@app.delete("/api/agents/{agent_id}")
+async def revoke_agent(agent_id: str, request: Request):
+    same_origin(request)
+    authorize(request)
+    async with lock:
+        records = AGENTS.records()
+        remaining = [record for record in records if record["id"] != agent_id]
+        if len(remaining) == len(records):
+            raise HTTPException(404, "Agent introuvable.")
+        AGENTS.save(remaining)
+        if active and active.get("agent_id") == agent_id:
+            active["stop"] = True
+        connection = AGENTS.connections.get(agent_id)
+    if connection:
+        await connection["socket"].close(code=1008)
+    return {"ok": True}
+
+
+@app.post("/api/agents/{agent_id}/start")
+async def start_agent(agent_id: str, body: AgentStart, request: Request):
+    global active
+    same_origin(request)
+    authorize(request)
+    async with lock:
+        if active:
+            raise HTTPException(409, "Une diffusion est déjà en cours.")
+        connection = AGENTS.connections.get(agent_id)
+        if not connection:
+            raise HTTPException(409, "Cet agent est hors ligne. Lancez-le sur le PC Windows.")
+        if any(zone not in {z["id"] for z in ZONES} for zone in body.zones):
+            raise HTTPException(422, "Sélectionnez des zones valides.")
+        record = next((record for record in AGENTS.records() if record["id"] == agent_id), None)
+        if not record:
+            raise HTTPException(404, "Agent introuvable.")
+        session = {"zones": sorted(set(body.zones)), "bytes": 0, "stop": False,
+                   "source": record["name"], "kind": "agent", "agent_id": agent_id,
+                   "agent_session": secrets.token_urlsafe(24), "started": time.time(),
+                   "multicast_address": MULTICAST, "audio": dict(AUDIO), "agent_connected": False}
+        active = session
+        connection["error"] = ""
+    try:
+        await asyncio.wait_for(connection["socket"].send_json({"command": "start",
+            "session": session["agent_session"], "zones": session["zones"],
+            "audio": {"block_ms": AUDIO["block_ms"], "max_backlog_ms": AUDIO["max_backlog_ms"]}}), 3)
+    except (RuntimeError, OSError, asyncio.TimeoutError):
+        async with lock:
+            if active is session:
+                active = None
+        raise HTTPException(409, "La connexion avec l’agent a été interrompue.")
+    return {"ok": True}
+
+
+@app.websocket("/api/agents/control")
+async def agent_control(ws: WebSocket):
+    global active
+    record = AGENTS.authenticate(ws.headers.get("authorization"))
+    if not record:
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    agent_id = record["id"]
+    connection = {"socket": ws, "status": "idle", "error": "", "device": ""}
+    async with lock:
+        if agent_id in AGENTS.connections:
+            await ws.close(code=1008)
+            return
+        AGENTS.connections[agent_id] = connection
+    try:
+        await ws.send_json({"command": "connected"})
+        last = time.monotonic()
+        while AGENTS.authenticate(ws.headers.get("authorization")):
+            try:
+                report = await asyncio.wait_for(ws.receive_json(), 1)
+                if not isinstance(report, dict):
+                    raise ValueError("Rapport invalide.")
+                last = time.monotonic()
+                connection["status"] = "capturing" if report.get("status") == "capturing" else "idle"
+                connection["error"] = str(report.get("error", ""))[:300]
+                connection["device"] = str(report.get("device", ""))[:200]
+                if (report.get("status") in ("stopped", "error") and active and active.get("agent_id") == agent_id
+                        and report.get("session") == active["agent_session"]):
+                    active["stop"] = True
+            except asyncio.TimeoutError:
+                if time.monotonic() - last > 15:
+                    break
+            async with lock:
+                if active and active.get("agent_id") == agent_id and not active["agent_connected"]:
+                    if active["stop"] or time.time() - active["started"] > 10:
+                        connection["error"] = connection["error"] or "L’agent n’a pas démarré la capture."
+                        active = None
+    except (WebSocketDisconnect, RuntimeError, ValueError):
+        pass
+    finally:
+        async with lock:
+            if AGENTS.connections.get(agent_id) is connection:
+                AGENTS.connections.pop(agent_id)
+            if active and active.get("agent_id") == agent_id:
+                active["stop"] = True
+                if not active["agent_connected"]:
+                    active = None
+
+
 @app.post("/api/stop")
 async def stop(request: Request):
     same_origin(request)
@@ -571,13 +709,21 @@ async def stop(request: Request):
         active["stop"] = True
         if active.get("kind") == "youtube" and youtube_player:
             await youtube_player.stop()
+        elif active.get("kind") == "agent":
+            connection = AGENTS.connections.get(active["agent_id"])
+            if connection:
+                try:
+                    await asyncio.wait_for(connection["socket"].send_json({"command": "stop", "session": active["agent_session"]}), 3)
+                except (RuntimeError, OSError, asyncio.TimeoutError):
+                    pass
     return {"ok": True}
 
 
 @app.websocket("/api/live")
 async def live(ws: WebSocket):
     global active
-    if not websocket_session(ws):
+    agent = AGENTS.authenticate(ws.headers.get("authorization"))
+    if not agent and not websocket_session(ws):
         await ws.close(code=1008)
         return
     await ws.accept()
@@ -587,15 +733,23 @@ async def live(ws: WebSocket):
         settings = await asyncio.wait_for(ws.receive_json(), 10)
         selected = settings.get("zones", [])
         async with lock:
+            if agent:
+                if (not active or active.get("agent_id") != agent["id"] or active["stop"]
+                        or active.get("agent_connected") or settings.get("agent_session") != active["agent_session"]):
+                    raise ValueError("Aucune capture autorisée pour cet agent.")
+                session = active
+                session["agent_connected"] = True
+                selected = session["zones"]
             allowed = {z["id"] for z in ZONES}
             if not selected or any(type(z) is not int or z not in allowed for z in selected):
                 raise ValueError("Sélectionnez des zones valides.")
-            if active:
+            if active and not agent:
                 raise ValueError("Une diffusion est déjà en cours.")
-            session = {"zones": sorted(set(selected)), "bytes": 0, "stop": False,
-                       "source": str(settings.get("source", "PC"))[:80], "started": time.time(),
-                       "multicast_address": MULTICAST}
-            active = session
+            if not agent:
+                session = {"zones": sorted(set(selected)), "bytes": 0, "stop": False,
+                           "source": str(settings.get("source", "PC"))[:80], "started": time.time(),
+                           "multicast_address": MULTICAST}
+                active = session
         if CONFIG["mode"] in ("bridge", "bodet"):
             command = CONFIG.get("bridge_command", [])
             if CONFIG["mode"] == "bodet":
@@ -620,7 +774,7 @@ async def live(ws: WebSocket):
         await ws.send_json({"ready": True, "mode": CONFIG["mode"]})
         start = time.monotonic()
         while not session["stop"]:
-            if not websocket_session(ws):
+            if (agent and not AGENTS.authenticate(ws.headers.get("authorization"))) or (not agent and not websocket_session(ws)):
                 break
             try:
                 data = await asyncio.wait_for(ws.receive_bytes(), 1)
@@ -657,6 +811,13 @@ async def live(ws: WebSocket):
         async with lock:
             if session is not None and active is session:
                 active = None
+        if agent and session:
+            connection = AGENTS.connections.get(agent["id"])
+            if connection:
+                try:
+                    await asyncio.wait_for(connection["socket"].send_json({"command": "stop", "session": session["agent_session"]}), 3)
+                except (RuntimeError, OSError, asyncio.TimeoutError):
+                    pass
         try:
             await ws.close()
         except RuntimeError:

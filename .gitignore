@@ -8,3 +8,6 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .test-deps/
+windows-agent/bin/
+windows-agent/obj/
+app/downloads/

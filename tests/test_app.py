@@ -14,6 +14,7 @@ def isolated_network_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'active', None)
     monkeypatch.setattr(main, 'youtube_player', None)
     monkeypatch.setattr(main, 'AUDIO', main.audio_settings())
+    monkeypatch.setattr(main, 'AGENTS', main.AgentRegistry(lambda: main.SETTINGS_PATH))
     monkeypatch.setitem(main.CONFIG, 'mode', 'simulation')
     monkeypatch.setattr(main, 'SETTINGS_PATH', tmp_path / 'settings.json')
     monkeypatch.setattr(main, 'MULTICAST', '239.192.55.1')
