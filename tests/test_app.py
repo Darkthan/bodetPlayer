@@ -28,6 +28,107 @@ def client():
     return result
 
 
+def test_audio_upload_persists_and_plays(monkeypatch):
+    import io
+    import wave
+    import shutil
+    if not shutil.which('ffmpeg'):
+        pytest.skip('FFmpeg unavailable')
+    sound = io.BytesIO()
+    with wave.open(sound, 'wb') as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(48000)
+        audio.writeframes(b'\x00\x00' * 4800)
+    headers = {'origin': 'https://testserver', 'content-type': 'application/octet-stream'}
+    with client() as c:
+        response = c.post('/api/library/upload', params={'name': '../Mon son.wav'}, content=sound.getvalue(), headers=headers)
+        assert response.status_code == 200, response.text
+        track = response.json()
+        saved, path = main.audio_library().get(track['id'])
+        assert saved['title'] == '../Mon son.wav'
+        assert path.parent == main.audio_library().directory
+        assert path.suffix == '.mp3' and path.stat().st_size > 0
+        assert c.get('/api/status').json()['library'][0]['id'] == track['id']
+        started = []
+        monkeypatch.setattr(main.YouTubePlayer, 'start_tracks', lambda self, tracks, repeat: started.extend(tracks))
+        assert c.post('/api/library/start', json={'tracks': [track['id']], 'zones': [1]}, headers={'origin': 'https://testserver'}).status_code == 200
+        assert started[0]['id'] == track['id']
+
+
+def test_audio_upload_rejects_non_audio():
+    import shutil
+    if not shutil.which('ffmpeg'):
+        pytest.skip('FFmpeg unavailable')
+    with client() as c:
+        response = c.post('/api/library/upload', content=b'not an audio file', headers={'origin': 'https://testserver'})
+        assert response.status_code == 422
+        assert not main.audio_library().list()
+        assert not list(main.audio_library().directory.iterdir())
+
+
+def test_saved_playlists_and_bulk_deletion(tmp_path):
+    ids = ['abcdefghijk', '12345678901', 'zzzzzzzzzzz']
+    for track_id in ids:
+        source = tmp_path / (track_id + '.mp3')
+        source.write_bytes(b'audio')
+        main.audio_library().save({'id': track_id, 'title': track_id}, source)
+    headers = {'origin': 'https://testserver'}
+    with client() as c:
+        response = c.post('/api/playlists', json={'name': 'Accueil', 'tracks': ids}, headers=headers)
+        assert response.status_code == 200
+        playlist_id = response.json()['id']
+        response = c.put('/api/playlists/' + playlist_id, json={'name': 'Pause', 'tracks': [ids[1], ids[0], ids[1]]}, headers=headers)
+        assert response.status_code == 200
+        assert main.saved_playlists()[0]['tracks'] == [ids[1], ids[0], ids[1]]
+        assert c.get('/api/status').json()['playlists'][0]['name'] == 'Pause'
+        # Validate every selected ID before deleting any existing sound.
+        response = c.post('/api/library/delete', json={'tracks': [ids[0], 'missingxxxx']}, headers=headers)
+        assert response.status_code == 404
+        assert len(main.audio_library().list()) == 3
+        response = c.post('/api/library/delete', json={'tracks': [ids[0], ids[1], ids[0]]}, headers=headers)
+        assert response.json()['deleted'] == 2
+        assert [t['id'] for t in main.audio_library().list()] == [ids[2]]
+        assert main.saved_playlists()[0]['tracks'] == []
+        assert c.delete('/api/playlists/' + playlist_id, headers=headers).status_code == 200
+        assert len(main.audio_library().list()) == 1
+        assert main.saved_playlists() == []
+
+
+def test_playlist_validation_authentication_and_active_session(monkeypatch):
+    headers = {'origin': 'https://testserver'}
+    body = {'name': 'Playlist', 'tracks': []}
+    with TestClient(main.app, base_url='https://testserver') as c:
+        assert c.post('/api/playlists', json=body, headers=headers).status_code == 401
+        assert c.post('/api/library/delete', json={'tracks': ['abcdefghijk']}, headers=headers).status_code == 401
+    with client() as c:
+        assert c.post('/api/playlists', json=body).status_code == 403
+        assert c.post('/api/library/delete', json={'tracks': ['abcdefghijk']}).status_code == 403
+        assert c.post('/api/playlists', json={'name': '  ', 'tracks': []}, headers=headers).status_code == 422
+        assert c.post('/api/playlists', json={'name': 'Test', 'tracks': ['abcdefghijk']}, headers=headers).status_code == 422
+        assert c.put('/api/playlists/absent', json=body, headers=headers).status_code == 404
+        assert c.delete('/api/playlists/absent', headers=headers).status_code == 404
+        monkeypatch.setattr(main, 'active', {'kind': 'youtube'})
+        assert c.post('/api/playlists', json=body, headers=headers).status_code == 409
+        assert c.post('/api/library/delete', json={'tracks': ['abcdefghijk']}, headers=headers).status_code == 409
+
+
+def test_audio_upload_rejects_invalid_and_unauthorized(monkeypatch):
+    monkeypatch.setattr(main.shutil, 'which', lambda name: 'ffmpeg')
+    headers = {'origin': 'https://testserver'}
+    with TestClient(main.app, base_url='https://testserver') as c:
+        assert c.post('/api/library/upload', content=b'audio', headers=headers).status_code == 401
+    with client() as c:
+        assert c.post('/api/library/upload', content=b'audio').status_code == 403
+        assert c.post('/api/library/upload', content=b'', headers=headers).status_code == 422
+        monkeypatch.setattr(main, 'MAX_FILE_BYTES', 4)
+        assert c.post('/api/library/upload', content=b'oversized', headers=headers).status_code == 413
+        assert not main.audio_library().list()
+        assert not list(main.audio_library().directory.iterdir())
+        monkeypatch.setattr(main, 'active', {'kind': 'youtube'})
+        assert c.post('/api/library/upload', content=b'audio', headers=headers).status_code == 409
+
+
 def test_authentication_and_origin():
     main.attempts.clear()
     with TestClient(main.app, base_url='https://testserver') as c:

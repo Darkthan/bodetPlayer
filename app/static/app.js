@@ -1,8 +1,11 @@
 const $ = id => document.getElementById(id);
-let socket, context, stream, processor, objectURL, running = false, busy = false;
+let socket, context, stream, processor, running = false, busy = false;
 let networkDirty = false;
 let youtubeSignature = '';
 let librarySignature = '', draftQueue = [], musicStatus = null, draggedTrack = null, ordering = false;
+let selectedSounds = new Set(), playlistsSignature = '', selectedPlaylist = '';
+let queueSequence = 0;
+const nextQueueId = () => `draft-${++queueSequence}`;
 let zonesSignature = '', currentZones = [], editingZone = null, settingsActive = false;
 const message = text => { $('message').textContent = text; };
 async function api(path, body, method = 'POST') {
@@ -49,7 +52,9 @@ async function refresh() {
     $('activity').textContent = status.active
       ? `${status.active.source} → zones ${status.active.zones.join(', ')} · ${(status.active.bytes / 96000).toFixed(1)} s reçues${status.mode === 'simulation' ? ' (simulation)' : ''}`
       : 'Aucune diffusion en cours.';
-    $('start').disabled = !!status.active || busy;
+    $('start').disabled = !!status.active || busy || uploading;
+    $('playYoutube').disabled = !!status.active || busy || uploading;
+    $('file').disabled = !!status.active || uploading;
     renderYouTube(status);
   } catch (error) {
     $('login').hidden = false; $('dashboard').hidden = true;
@@ -64,17 +69,19 @@ async function cleanup() {
   if (processor) { processor.disconnect(); processor = null; }
   if (stream) { stream.getTracks().forEach(track => track.stop()); stream = null; }
   if (context) { await context.close(); context = null; }
-  $('audio').pause(); busy = false; $('start').disabled = false;
+  busy = false; $('start').disabled = false;
 }
 function renderYouTube(status) {
   musicStatus = status;
   const library = status.library || [];
+  selectedSounds = new Set([...selectedSounds].filter(id => library.some(track => track.id === id)));
+  renderPlaylists(status);
   draftQueue = draftQueue.filter(track => library.some(saved => saved.id === track.id));
   const state = status.youtube;
   const activeYouTube = status.active?.kind === 'youtube';
   const source = document.querySelector('input[name=source]:checked').value;
-  $('youtubeSettings').hidden = !activeYouTube && !['youtube', 'library'].includes(source);
-  $('youtubeLink').hidden = source === 'library';
+  $('youtubeSettings').hidden = !activeYouTube && source !== 'library';
+
   $('youtubePrevious').disabled = !activeYouTube || !state?.queue.length;
   $('youtubeNext').disabled = !activeYouTube || !state?.queue.length;
   $('playerStop').disabled = !activeYouTube;
@@ -137,19 +144,27 @@ function renderYouTube(status) {
   }
   $('libraryCount').textContent = `${library.length} piste(s)`;
   $('libraryEmpty').hidden = library.length > 0;
-  const savedSignature = JSON.stringify([library, !!status.active, draftQueue.map(t => t.id)]);
+  const savedSignature = JSON.stringify([library, !!status.active, draftQueue.map(t => t.id), [...selectedSounds]]);
   if (savedSignature !== librarySignature) {
     librarySignature = savedSignature;
     $('audioLibrary').replaceChildren();
     for (const track of library) {
       const row = document.createElement('div'); row.className = 'library-track';
+      const select = document.createElement('input'); select.type = 'checkbox';
+      select.checked = selectedSounds.has(track.id); select.disabled = !!status.active;
+      select.setAttribute('aria-label', `Sélectionner ${track.title}`);
+      select.onchange = () => {
+        if (select.checked) selectedSounds.add(track.id); else selectedSounds.delete(track.id);
+        renderYouTube(musicStatus);
+      };
       const label = document.createElement('span'); label.textContent = track.title;
       const add = document.createElement('button'); add.type = 'button'; add.className = 'secondary';
       const included = draftQueue.some(t => t.id === track.id);
       add.textContent = included ? 'Ajouté' : '+ Ajouter'; add.disabled = !!status.active || included;
       add.setAttribute('aria-label', `Ajouter ${track.title} à la file`);
       add.onclick = () => {
-        draftQueue.push({...track, queue_id:track.id});
+        if (draftQueue.length >= 100) { message('Une playlist contient au maximum 100 pistes.'); return; }
+        draftQueue.push({...track, queue_id:nextQueueId()});
         const radio = document.querySelector('input[name=source][value=library]'); radio.checked = true; radio.onchange();
         renderYouTube(musicStatus);
       };
@@ -162,10 +177,84 @@ function renderYouTube(status) {
         catch (error) { message(error.message); }
         await refresh();
       };
-      row.append(label, add, remove); $('audioLibrary').append(row);
+      row.append(select, label, add, remove); $('audioLibrary').append(row);
     }
   }
+  $('selectionCount').textContent = `${selectedSounds.size} son(s) sélectionné(s)`;
+  $('selectAllSounds').disabled = !!status.active || !library.length;
+  $('selectAllSounds').textContent = selectedSounds.size === library.length && library.length ? 'Tout désélectionner' : 'Tout sélectionner';
+  $('addSelectedSounds').disabled = !!status.active || !selectedSounds.size;
+  $('deleteSelectedSounds').disabled = !!status.active || !selectedSounds.size;
 }
+function renderPlaylists(status) {
+  const playlists = status.playlists || [];
+  if (selectedPlaylist && !playlists.some(p => p.id === selectedPlaylist)) {
+    selectedPlaylist = ''; $('playlistName').value = '';
+  }
+  const signature = JSON.stringify(playlists);
+  if (signature !== playlistsSignature) {
+    playlistsSignature = signature;
+    $('savedPlaylist').replaceChildren(new Option('Nouvelle playlist', ''));
+    playlists.forEach(playlist => $('savedPlaylist').append(new Option(`${playlist.name} · ${playlist.tracks.length} piste(s)`, playlist.id)));
+    $('savedPlaylist').value = selectedPlaylist;
+  }
+  for (const id of ['savedPlaylist', 'playlistName', 'newPlaylist', 'savePlaylist']) $(id).disabled = !!status.active;
+  $('deletePlaylist').disabled = !!status.active || !selectedPlaylist;
+  $('savePlaylist').textContent = selectedPlaylist ? 'Enregistrer les modifications' : 'Enregistrer la playlist';
+}
+$('savedPlaylist').onchange = () => {
+  selectedPlaylist = $('savedPlaylist').value;
+  const playlist = musicStatus.playlists?.find(p => p.id === selectedPlaylist);
+  $('playlistName').value = playlist?.name || '';
+  const library = musicStatus.library || [];
+  draftQueue = (playlist?.tracks || []).map(id => library.find(track => track.id === id))
+    .filter(Boolean).map(track => ({...track, queue_id:nextQueueId()}));
+  renderYouTube(musicStatus);
+};
+$('newPlaylist').onclick = () => {
+  selectedPlaylist = ''; $('savedPlaylist').value = ''; $('playlistName').value = '';
+  draftQueue = []; renderYouTube(musicStatus); $('playlistName').focus();
+};
+$('savePlaylist').onclick = async () => {
+  const name = $('playlistName').value.trim();
+  if (!name) { message('Donnez un nom à la playlist.'); $('playlistName').focus(); return; }
+  try {
+    const result = await api(selectedPlaylist ? `playlists/${selectedPlaylist}` : 'playlists',
+      {name, tracks:draftQueue.map(track => track.id)}, selectedPlaylist ? 'PUT' : 'POST');
+    selectedPlaylist = result.id; playlistsSignature = ''; message('Playlist enregistrée.');
+  } catch (error) { message(error.message); }
+  await refresh();
+};
+$('deletePlaylist').onclick = async () => {
+  if (!selectedPlaylist || !confirm('Supprimer cette playlist ? Les sons resteront dans la bibliothèque.')) return;
+  try {
+    await api(`playlists/${selectedPlaylist}`, {}, 'DELETE');
+    selectedPlaylist = ''; $('playlistName').value = ''; draftQueue = [];
+    message('Playlist supprimée. Les sons sont conservés.');
+  } catch (error) { message(error.message); }
+  await refresh();
+};
+$('selectAllSounds').onclick = () => {
+  const library = musicStatus.library || [];
+  selectedSounds = selectedSounds.size === library.length ? new Set() : new Set(library.map(track => track.id));
+  renderYouTube(musicStatus);
+};
+$('addSelectedSounds').onclick = () => {
+  const tracks = musicStatus.library.filter(track => selectedSounds.has(track.id) && !draftQueue.some(t => t.id === track.id));
+  if (draftQueue.length + tracks.length > 100) { message('Une playlist contient au maximum 100 pistes.'); return; }
+  draftQueue.push(...tracks.map(track => ({...track, queue_id:nextQueueId()})));
+  selectedSounds.clear(); renderYouTube(musicStatus);
+};
+$('deleteSelectedSounds').onclick = async () => {
+  const tracks = [...selectedSounds];
+  if (!tracks.length || !confirm(`Supprimer définitivement ${tracks.length} son(s) du serveur et de toutes les playlists ?`)) return;
+  $('deleteSelectedSounds').disabled = true;
+  try {
+    await api('library/delete', {tracks}); selectedSounds.clear();
+    message(`${tracks.length} son(s) supprimé(s).`);
+  } catch (error) { message(error.message); }
+  await refresh();
+};
 async function moveTrack(queue, from, to, activeYouTube) {
   if (ordering || from === to) return;
   const reordered = [...queue]; reordered.splice(to, 0, reordered.splice(from, 1)[0]);
@@ -261,39 +350,74 @@ $('all').onclick = () => {
 };
 document.querySelectorAll('input[name=source]').forEach(input => input.onchange = () => {
   const source = document.querySelector('input[name=source]:checked').value;
-  const file = source === 'file';
-  $('file').hidden = !file; $('audio').hidden = !file;
-  $('loopbackSettings').hidden = source !== 'loopback';
-  $('youtubeSettings').hidden = !['youtube', 'library'].includes(source);
+  $('youtubeSettings').hidden = source !== 'library';
+  $('captureHint').hidden = source === 'library';
+  $('captureHint').textContent = source === 'mic'
+    ? 'Autorisez le microphone pour diffuser votre voix.'
+    : 'Dans Chrome ou Edge, choisissez un onglet et cochez « Partager l’audio de l’onglet ». Firefox ne permet pas cette capture ; utilisez la playlist pour YouTube.';
   if (musicStatus) renderYouTube(musicStatus);
 });
-$('listAudioInputs').onclick = async () => {
-  if (busy || running) return;
-  $('listAudioInputs').disabled = true;
-  let permissionStream;
+let uploading = false;
+async function uploadAudioFiles(files) {
+  if (uploading) return;
+  if (busy || running || musicStatus?.active) { message('Arrêtez la diffusion avant d’importer des sons.'); return; }
+  if (!files.length) return;
+  uploading = true; $('file').disabled = true; $('start').disabled = true; $('playYoutube').disabled = true;
+  const outcomes = [];
   try {
-    if (!window.isSecureContext) throw new Error('Utilisez HTTPS ou déclarez cette adresse fiable dans Firefox avant de rechercher les entrées.');
-    permissionStream = await navigator.mediaDevices.getUserMedia({audio:true});
-    const inputs = (await navigator.mediaDevices.enumerateDevices()).filter(device => device.kind === 'audioinput' && device.deviceId);
-    const previous = $('audioInput').value;
-    $('audioInput').replaceChildren(new Option('Choisissez Mixage stéréo ou une entrée virtuelle', ''));
-    inputs.forEach((device, index) => $('audioInput').append(new Option(device.label || `Entrée audio ${index + 1}`, device.deviceId)));
-    if (inputs.some(device => device.deviceId === previous)) $('audioInput').value = previous;
-    $('audioInputStatus').textContent = 'Choisissez explicitement l’entrée de bouclage. Si elle est absente, activez-la dans Windows puis recherchez à nouveau. Un microphone capte la pièce, pas le son de YouTube.';
-  } catch (error) {
-    $('audioInputStatus').textContent = error.message;
+    for (const file of files) {
+      if (file.size > 100 * 1024 * 1024) { outcomes.push(`${file.name} : dépasse 100 Mio.`); continue; }
+      $('uploadStatus').textContent = `Import de ${file.name}…`;
+      try {
+        const response = await fetch('/api/library/upload?name=' + encodeURIComponent(file.name), {
+          method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:file
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || 'Import impossible.');
+        draftQueue.push({...result, queue_id:result.id});
+        outcomes.push(`${file.name} : ajouté à la playlist.`);
+      } catch (error) { outcomes.push(`${file.name} : ${error.message}`); }
+    }
+    await refresh();
   } finally {
-    permissionStream?.getTracks().forEach(track => track.stop());
-    $('listAudioInputs').disabled = false;
+    uploading = false; $('file').disabled = false; $('file').value = '';
+    $('uploadStatus').textContent = outcomes.join(' ');
+    await refresh();
   }
-};
-$('file').onchange = () => {
-  if (objectURL) URL.revokeObjectURL(objectURL);
-  const file = $('file').files[0];
-  if (file) { objectURL = URL.createObjectURL(file); $('audio').src = objectURL; }
+}
+$('file').onchange = () => uploadAudioFiles(Array.from($('file').files));
+const isFileDrop = event => Array.from(event.dataTransfer?.types || []).includes('Files');
+document.addEventListener('dragover', event => {
+  if (!isFileDrop(event)) return;
+  event.preventDefault(); event.dataTransfer.dropEffect = $('dashboard').hidden ? 'none' : 'copy';
+  if (!$('youtubeSettings').hidden) $('fileDrop').classList.add('drag-over');
+});
+document.addEventListener('dragleave', event => {
+  if (!event.relatedTarget) $('fileDrop').classList.remove('drag-over');
+});
+document.addEventListener('drop', event => {
+  if (!isFileDrop(event)) return;
+  event.preventDefault(); $('fileDrop').classList.remove('drag-over');
+  if ($('dashboard').hidden) { message('Connectez-vous avant de déposer un son.'); return; }
+  const radio = document.querySelector('input[name=source][value=library]'); radio.checked = true; radio.onchange();
+  uploadAudioFiles(Array.from(event.dataTransfer.files));
+});
+$('playYoutube').onclick = async () => {
+  if (busy || running || uploading) return;
+  busy = true; $('playYoutube').disabled = true;
+  try {
+    if (networkDirty) throw new Error('Enregistrez l’adresse multicast avant de démarrer.');
+    const zones = [...$('zones').querySelectorAll('input:checked')].map(input => Number(input.value));
+    if (!zones.length) throw new Error('Sélectionnez au moins une zone.');
+    const url = $('youtubeUrl').value.trim();
+    if (!url) throw new Error('Saisissez un lien YouTube.');
+    await api('youtube/start', {url, zones, loop:$('youtubeLoop').value});
+    message('');
+  } catch (error) { message(error.message); }
+  finally { busy = false; $('playYoutube').disabled = false; await refresh(); }
 };
 $('start').onclick = async () => {
-  if (busy || running) return;
+  if (busy || running || uploading) return;
   busy = true; $('start').disabled = true; message('');
   try {
     if (networkDirty) throw new Error('Enregistrez l’adresse multicast avant de démarrer la diffusion.');
@@ -307,35 +431,16 @@ $('start').onclick = async () => {
       await refresh();
       return;
     }
-    if (source === 'youtube') {
-      const url = $('youtubeUrl').value.trim();
-      if (!url) throw new Error('Saisissez le lien d’une vidéo YouTube ou d’une playlist.');
-      await api('youtube/start', {url, zones, loop:$('youtubeLoop').value});
-      busy = false;
-      await refresh();
-      return;
-    }
     if (!window.isSecureContext) throw new Error('Pour capturer le son, utilisez HTTPS avec un certificat approuvé ou http://127.0.0.1 sur le PC hébergeant l’application.');
     context = new AudioContext({sampleRate:48000, latencyHint:'interactive'});
     await context.resume();
     let node;
-    if (source === 'file') {
-      if (!$('file').files.length) throw new Error('Choisissez un fichier audio.');
-      // A fresh element permits a new MediaElementSource on each session.
-      const previous = $('audio');
-      const audio = previous.cloneNode(); previous.replaceWith(audio);
-      node = context.createMediaElementSource(audio);
-      audio.onended = () => cleanup();
-    } else {
-      if (source === 'loopback' && !$('audioInput').value) throw new Error('Recherchez les entrées audio et choisissez Mixage stéréo ou une entrée virtuelle.');
-      stream = source === 'mic' || source === 'loopback'
-        ? await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,
-            ...(source === 'loopback' ? {deviceId:{exact:$('audioInput').value}} : {})}})
-        : await navigator.mediaDevices.getDisplayMedia({video:true,audio:true,systemAudio:'include'});
-      if (!stream.getAudioTracks().length) throw new Error('Le navigateur n’a fourni aucune piste audio. Pour YouTube, utilisez Chrome ou Edge, choisissez « Onglet » puis cochez « Partager l’audio de l’onglet ». Firefox ne prend pas en charge cette capture audio ; utilisez un fichier audio ou le microphone.');
-      stream.getTracks().forEach(track => track.onended = () => cleanup());
-      node = context.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
-    }
+    stream = source === 'mic'
+      ? await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
+      : await navigator.mediaDevices.getDisplayMedia({video:true,audio:true,systemAudio:'include'});
+    if (!stream.getAudioTracks().length) throw new Error('Aucun son partagé. Dans Chrome ou Edge, choisissez un onglet et cochez « Partager l’audio ». Pour YouTube dans Firefox, utilisez le lien dans Playlist.');
+    stream.getTracks().forEach(track => track.onended = () => cleanup());
+    node = context.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
     await context.audioWorklet.addModule('/static/pcm.js');
     const captureSettings = musicStatus?.audio || {block_ms:20, max_backlog_ms:200};
     processor = new AudioWorkletNode(context, 'pcm', {processorOptions:{blockFrames:captureSettings.block_ms * 48}});
@@ -362,7 +467,6 @@ $('start').onclick = async () => {
       }
     };
     node.connect(processor); processor.connect(context.destination);
-    if (source === 'file') await $('audio').play();
     await refresh();
   } catch (error) { message(error.message); await cleanup(); }
 };

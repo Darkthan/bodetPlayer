@@ -10,6 +10,7 @@ import secrets
 import shutil
 import sys
 import time
+import tempfile
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -19,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StrictInt
-from app.youtube import Library, YouTubePlayer, youtube_url
+from app.youtube import Library, YouTubePlayer, youtube_url, MAX_FILE_BYTES, MAX_LIBRARY_BYTES, spawn, terminate
 from app.audio import audio_settings
 
 STATIC = Path(__file__).parent / "static"
@@ -168,6 +169,34 @@ class QueueOrder(BaseModel):
     order: list[str] = Field(min_length=1, max_length=100)
 
 
+class PlaylistSettings(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    tracks: list[str] = Field(max_length=100)
+
+
+class LibraryDelete(BaseModel):
+    tracks: list[str] = Field(min_length=1, max_length=1000)
+
+
+def saved_playlists():
+    path = SETTINGS_PATH.parent / "playlists.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    except (OSError, ValueError):
+        raise HTTPException(500, "Impossible de lire les playlists enregistrées.")
+
+
+def save_playlists(playlists):
+    path = SETTINGS_PATH.parent / "playlists.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(playlists, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        raise HTTPException(500, "Impossible d’enregistrer les playlists.")
+
+
 def audio_library():
     return Library(SETTINGS_PATH.parent / "youtube" / "library")
 
@@ -220,6 +249,7 @@ async def status(request: Request):
             "multicast_address": MULTICAST,
             "youtube": youtube_player.snapshot() if youtube_player else None,
             "library": audio_library().list(),
+            "playlists": saved_playlists(),
             "audio": {"block_ms": AUDIO["block_ms"], "max_backlog_ms": AUDIO["max_backlog_ms"]}}
 
 
@@ -313,17 +343,140 @@ async def youtube_order(body: QueueOrder, request: Request):
         return youtube_player.snapshot()
 
 
-@app.delete("/api/library/{video_id}")
-async def delete_library_track(video_id: str, request: Request):
+@app.post("/api/library/upload")
+async def upload_library_track(request: Request):
+    same_origin(request)
+    authorize(request)
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(503, "Reconstruisez l’image Docker pour installer FFmpeg.")
+    title = request.query_params.get("name", "Son importé").strip()[:200] or "Son importé"
+    async with lock:
+        if active:
+            raise HTTPException(409, "Arrêtez la diffusion avant d’importer des sons.")
+        library = audio_library()
+        used = sum(track["size"] for track in library.list())
+        library.directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=library.directory) as temporary:
+            source = Path(temporary) / "input"
+            size = 0
+            with source.open("wb") as output:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_FILE_BYTES:
+                        raise HTTPException(413, "Chaque son est limité à 100 Mio.")
+                    output.write(chunk)
+            if not size:
+                raise HTTPException(422, "Le fichier est vide.")
+            target = Path(temporary) / "audio.mp3"
+            process = await spawn("ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe",
+                                  "-i", str(source), "-map", "0:a:0", "-vn", "-t", "3600",
+                                  "-codec:a", "libmp3lame", "-b:a", "128k", "-fs", str(MAX_FILE_BYTES + 1),
+                                  str(target), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            try:
+                await asyncio.wait_for(process.wait(), 300)
+                if process.returncode or not target.exists() or not target.stat().st_size:
+                    raise HTTPException(422, "Ce fichier ne contient pas de son lisible.")
+                converted_size = target.stat().st_size
+                if converted_size > MAX_FILE_BYTES or used + converted_size > MAX_LIBRARY_BYTES:
+                    raise HTTPException(413, "Bibliothèque pleine (1 Gio) ou son trop volumineux.")
+                track_id = secrets.token_urlsafe(9)[:11]
+                while (library.directory / (track_id + ".json")).exists():
+                    track_id = secrets.token_urlsafe(9)[:11]
+                track = {"id": track_id, "title": title}
+                library.save(track, target)
+                return track
+            except asyncio.TimeoutError:
+                raise HTTPException(408, "L’import audio a dépassé cinq minutes.")
+            finally:
+                await terminate(process)
+
+
+async def delete_library_tracks(tracks, request):
     same_origin(request)
     authorize(request)
     async with lock:
         if active:
             raise HTTPException(409, "Arrêtez la diffusion avant de supprimer une piste.")
         try:
-            audio_library().delete(video_id)
+            library = audio_library()
+            unique = set(tracks)
+            # Validate the whole selection before deleting any file.
+            for track_id in unique:
+                library.get(track_id)
         except ValueError as exc:
             raise HTTPException(404, str(exc))
+        playlists = saved_playlists()
+        for playlist in playlists:
+            playlist["tracks"] = [track_id for track_id in playlist["tracks"] if track_id not in unique]
+        save_playlists(playlists)
+        for track_id in unique:
+            library.delete(track_id)
+    return {"deleted": len(unique)}
+
+
+@app.post("/api/library/delete")
+async def bulk_delete_library(body: LibraryDelete, request: Request):
+    return await delete_library_tracks(body.tracks, request)
+
+
+@app.delete("/api/library/{video_id}")
+async def delete_library_track(video_id: str, request: Request):
+    await delete_library_tracks([video_id], request)
+    return {"ok": True}
+
+
+async def write_playlist(body, request, playlist_id=None):
+    same_origin(request)
+    authorize(request)
+    async with lock:
+        if active:
+            raise HTTPException(409, "Arrêtez la diffusion avant de modifier les playlists.")
+        playlists = saved_playlists()
+        existing = next((p for p in playlists if p["id"] == playlist_id), None)
+        if playlist_id is not None and existing is None:
+            raise HTTPException(404, "Playlist introuvable.")
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(422, "Donnez un nom à la playlist.")
+        try:
+            for track_id in body.tracks:
+                audio_library().get(track_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        if existing:
+            existing.update(name=name, tracks=body.tracks)
+            result = existing
+        else:
+            if len(playlists) >= 100:
+                raise HTTPException(409, "La limite de 100 playlists est atteinte.")
+            result = {"id": secrets.token_hex(16), "name": name, "tracks": body.tracks}
+            playlists.append(result)
+        save_playlists(playlists)
+        return result
+
+
+@app.post("/api/playlists")
+async def create_playlist(body: PlaylistSettings, request: Request):
+    return await write_playlist(body, request)
+
+
+@app.put("/api/playlists/{playlist_id}")
+async def update_playlist(playlist_id: str, body: PlaylistSettings, request: Request):
+    return await write_playlist(body, request, playlist_id)
+
+
+@app.delete("/api/playlists/{playlist_id}")
+async def delete_playlist(playlist_id: str, request: Request):
+    same_origin(request)
+    authorize(request)
+    async with lock:
+        if active:
+            raise HTTPException(409, "Arrêtez la diffusion avant de supprimer une playlist.")
+        playlists = saved_playlists()
+        remaining = [p for p in playlists if p["id"] != playlist_id]
+        if len(remaining) == len(playlists):
+            raise HTTPException(404, "Playlist introuvable.")
+        save_playlists(remaining)
     return {"ok": True}
 
 

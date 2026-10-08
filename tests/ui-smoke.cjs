@@ -12,14 +12,30 @@ const assert = require('node:assert/strict');
     page.on('pageerror', error => errors.push(error.message));
     const state = {mode:'simulation', zones:[{id:1, name:'Salle'}], active:null,
       multicast_address:'239.1.2.3', youtube:null,
-      library:[{id:'abcdefghijk', title:'Première chanson', size:1000},
+      playlists:[], library:[{id:'abcdefghijk', title:'Première chanson', size:1000},
                {id:'12345678901', title:'Deuxième chanson', size:2000}]};
     await page.route('**/*', async route => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname.startsWith('/api/')) {
-        const body = request.postDataJSON();
-        if (url.pathname === '/api/library/start') {
+        const body = url.pathname === '/api/library/upload' ? null : request.postDataJSON();
+        if (url.pathname === '/api/library/upload') {
+          const track = {id:`upload${state.library.length}`.padEnd(11, 'x'), title:url.searchParams.get('name'), size:1000};
+          state.library.push(track);
+          await route.fulfill({json:track}); return;
+        }
+        if (url.pathname === '/api/playlists') {
+          const playlist = {id:'saved1', ...body}; state.playlists.push(playlist);
+          await route.fulfill({json:playlist}); return;
+        } else if (url.pathname === '/api/playlists/saved1' && request.method() === 'PUT') {
+          Object.assign(state.playlists[0], body);
+          await route.fulfill({json:state.playlists[0]}); return;
+        } else if (url.pathname === '/api/playlists/saved1' && request.method() === 'DELETE') {
+          state.playlists = [];
+        } else if (url.pathname === '/api/library/delete') {
+          state.library = state.library.filter(t => !body.tracks.includes(t.id));
+          state.playlists.forEach(p => p.tracks = p.tracks.filter(id => !body.tracks.includes(id)));
+        } else if (url.pathname === '/api/library/start') {
           state.active = {kind:'youtube', source:'Bibliothèque', zones:body.zones, bytes:96000};
           state.youtube = {status:'playing', loop:body.loop, index:0, error:'', warning:'',
             queue:body.tracks.map((id, index) => ({...state.library.find(t => t.id === id), queue_id:'q' + index}))};
@@ -45,6 +61,7 @@ const assert = require('node:assert/strict');
       }
     });
     await page.goto('http://bodet-ui.test/');
+    assert.equal(await page.locator('input[name=source]').count(), 3);
     assert.equal(await page.evaluate(() => window.isSecureContext), false);
     await page.locator('input[name=source][value=library]').check();
     await page.getByRole('button', {name:'Ajouter Première chanson à la file', exact:true}).click();
@@ -83,6 +100,42 @@ const assert = require('node:assert/strict');
     assert.equal(state.active, null);
     page.on('dialog', dialog => dialog.accept());
     await page.getByRole('button', {name:'Supprimer Première chanson de la bibliothèque', exact:true}).click();
+    assert.equal(state.library.length, 1);
+    await page.locator('#file').setInputFiles({name:'Mon son.wav', mimeType:'audio/wav', buffer:Buffer.from('test audio')});
+    await page.locator('#uploadStatus').filter({hasText:'ajouté à la playlist'}).waitFor();
+    assert.equal(state.library.length, 2);
+    assert.ok((await page.locator('.queue-title').allTextContents()).includes('Mon son.wav'));
+    const drop = await page.evaluateHandle(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['audio'], 'Déposé.mp3', {type:'audio/mpeg'}));
+      return transfer;
+    });
+    await page.locator('#fileDrop').dispatchEvent('drop', {dataTransfer:drop});
+    await page.locator('#uploadStatus').filter({hasText:'Déposé.mp3 : ajouté'}).waitFor();
+    assert.equal(new URL(page.url()).hostname, 'bodet-ui.test');
+    assert.equal(state.library.length, 3);
+    await page.locator('#playlistName').fill('Accueil');
+    await page.locator('#savePlaylist').click();
+    await page.waitForFunction(() => document.querySelector('#savedPlaylist').value === 'saved1');
+    const savedOrder = [...state.playlists[0].tracks];
+    await page.locator('#newPlaylist').click();
+    assert.equal(await page.locator('.queue-title').count(), 0);
+    await page.locator('#savedPlaylist').selectOption('saved1');
+    assert.equal(await page.locator('.queue-title').count(), savedOrder.length);
+    await page.getByRole('button', {name:'Monter Déposé.mp3', exact:true}).click();
+    await page.locator('#playlistName').fill('Pause');
+    await page.locator('#savePlaylist').click();
+    await page.waitForFunction(() => document.querySelector('#message').textContent === 'Playlist enregistrée.');
+    assert.equal(state.playlists[0].name, 'Pause');
+    assert.notDeepEqual(state.playlists[0].tracks, savedOrder);
+    await page.getByRole('checkbox', {name:'Sélectionner Mon son.wav', exact:true}).check();
+    await page.getByRole('checkbox', {name:'Sélectionner Déposé.mp3', exact:true}).check();
+    await page.locator('#deleteSelectedSounds').click();
+    await page.waitForFunction(() => document.querySelector('#libraryCount').textContent === '1 piste(s)');
+    assert.equal(state.library.length, 1);
+    assert.equal(state.playlists[0].tracks.length, 1);
+    await page.locator('#deletePlaylist').click();
+    await page.waitForFunction(() => document.querySelector('#savedPlaylist').options.length === 1);
     assert.equal(state.library.length, 1);
     assert.deepEqual(errors, []);
     console.log('UI passed: HTTP playback, library, draft/live reorder, drag/drop, repeat, navigation, stop, delete, mobile layout.');
