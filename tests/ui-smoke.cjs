@@ -11,7 +11,7 @@ const assert = require('node:assert/strict');
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     const state = {mode:'simulation', zones:[{id:1, name:'Salle'}], active:null,
-      multicast_address:'239.1.2.3', youtube:null,
+      multicast_address:'239.1.2.3', youtube:null, audio:{block_ms:20, max_backlog_ms:200},
       playlists:[], library:[{id:'abcdefghijk', title:'Première chanson', size:1000},
                {id:'12345678901', title:'Deuxième chanson', size:2000}]};
     await page.route('**/*', async route => {
@@ -24,7 +24,10 @@ const assert = require('node:assert/strict');
           state.library.push(track);
           await route.fulfill({json:track}); return;
         }
-        if (url.pathname === '/api/playlists') {
+        if (url.pathname === '/api/settings/audio') {
+          state.audio = body;
+          await route.fulfill({json:body}); return;
+        } else if (url.pathname === '/api/playlists') {
           const playlist = {id:'saved1', ...body}; state.playlists.push(playlist);
           await route.fulfill({json:playlist}); return;
         } else if (url.pathname === '/api/playlists/saved1' && request.method() === 'PUT') {
@@ -63,6 +66,12 @@ const assert = require('node:assert/strict');
     await page.goto('http://bodet-ui.test/');
     assert.equal(await page.locator('input[name=source]').count(), 3);
     assert.equal(await page.evaluate(() => window.isSecureContext), false);
+    await page.locator('#settingsButton').click();
+    await page.locator('#audioFast').click();
+    await page.locator('#saveAudio').click();
+    await page.locator('#audioStatus').filter({hasText:'Réglages enregistrés'}).waitFor();
+    assert.deepEqual(state.audio, {block_ms:10, max_backlog_ms:100});
+    await page.locator('#closeSettings').click();
     await page.locator('input[name=source][value=library]').check();
     await page.getByRole('button', {name:'Ajouter Première chanson à la file', exact:true}).click();
     await page.getByRole('button', {name:'Ajouter Deuxième chanson à la file', exact:true}).click();
@@ -72,6 +81,9 @@ const assert = require('node:assert/strict');
     await page.locator('#start').click();
     await page.locator('#playerTitle').filter({hasText:'Deuxième chanson'}).waitFor();
     assert.equal(state.youtube.queue[0].id, '12345678901');
+    await page.locator('#settingsButton').click();
+    assert.equal(await page.locator('#audioBlock').isDisabled(), true);
+    await page.locator('#closeSettings').click();
     // Move the current track and verify playback remains on that track.
     await page.getByRole('button', {name:'Descendre Deuxième chanson', exact:true}).click();
     assert.equal(state.youtube.index, 1);

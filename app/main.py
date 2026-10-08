@@ -48,11 +48,12 @@ ZONES = (json.loads(SETTINGS_PATH.read_text(encoding="utf-8")).get("zones", CONF
          if SETTINGS_PATH.exists() else CONFIG["zones"])
 
 
-def save_settings(address, zones):
+def save_settings(address, zones, audio=None):
     try:
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         temporary = SETTINGS_PATH.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"multicast_address": address, "zones": zones},
+        temporary.write_text(json.dumps({"multicast_address": address, "zones": zones,
+                                        "audio": audio if audio is not None else AUDIO},
                                         indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         temporary.replace(SETTINGS_PATH)
     except OSError:
@@ -102,7 +103,12 @@ lock = asyncio.Lock()
 active = None
 youtube_player = None
 attempts = {}
-AUDIO = audio_settings()
+def load_audio():
+    settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8")) if SETTINGS_PATH.exists() else {}
+    return audio_settings(settings.get("audio"))
+
+
+AUDIO = load_audio()
 
 
 def valid(token):
@@ -141,6 +147,11 @@ class Login(BaseModel):
 
 class NetworkSettings(BaseModel):
     multicast_address: str = Field(max_length=64)
+
+
+class AudioSettings(BaseModel):
+    block_ms: StrictInt = Field(ge=10, le=100)
+    max_backlog_ms: StrictInt = Field(ge=40, le=1000)
 
 
 class ZoneSettings(BaseModel):
@@ -278,7 +289,7 @@ async def youtube_start(body: YouTubeStart, request: Request):
             raise HTTPException(422, "Sélectionnez des zones valides.")
         session = {"zones": sorted(set(body.zones)), "bytes": 0, "stop": False,
                    "source": "YouTube", "kind": "youtube", "started": time.time(),
-                   "multicast_address": MULTICAST}
+                   "multicast_address": MULTICAST, "audio": dict(AUDIO)}
         player = YouTubePlayer(session, CONFIG, SETTINGS_PATH.parent / "youtube", youtube_finished)
         active = session
         youtube_player = player
@@ -321,7 +332,7 @@ async def library_start(body: LibraryStart, request: Request):
             raise HTTPException(422, str(exc))
         session = {"zones": sorted(set(body.zones)), "bytes": 0, "stop": False,
                    "source": "Bibliothèque", "kind": "youtube", "started": time.time(),
-                   "multicast_address": MULTICAST}
+                   "multicast_address": MULTICAST, "audio": dict(AUDIO)}
         player = YouTubePlayer(session, CONFIG, SETTINGS_PATH.parent / "youtube", youtube_finished)
         active = session
         youtube_player = player
@@ -480,6 +491,23 @@ async def delete_playlist(playlist_id: str, request: Request):
     return {"ok": True}
 
 
+@app.post("/api/settings/audio")
+async def update_audio_settings(body: AudioSettings, request: Request):
+    global AUDIO
+    same_origin(request)
+    authorize(request)
+    try:
+        settings = audio_settings(body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    async with lock:
+        if active:
+            raise HTTPException(409, "Arrêtez la diffusion avant de modifier le buffer.")
+        save_settings(MULTICAST, ZONES, settings)
+        AUDIO = settings
+    return {"block_ms": AUDIO["block_ms"], "max_backlog_ms": AUDIO["max_backlog_ms"]}
+
+
 @app.post("/api/settings/network")
 async def network_settings(body: NetworkSettings, request: Request):
     global MULTICAST
@@ -581,6 +609,8 @@ async def live(ws: WebSocket):
                        AUDIO_FORMAT="s16le", AUDIO_RATE="48000", AUDIO_CHANNELS="1")
             env["BODET_QUALITY"] = CONFIG.get("bodet_quality", "low")
             env["BODET_INTERFACE"] = CONFIG.get("bodet_interface", "")
+            env["PLAYER_AUDIO_BLOCK_MS"] = str(AUDIO["block_ms"])
+            env["PLAYER_AUDIO_MAX_BACKLOG_MS"] = str(AUDIO["max_backlog_ms"])
             process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
                                                           stdout=asyncio.subprocess.DEVNULL, env=env)
             process.stdin.transport.set_write_buffer_limits(high=AUDIO["max_backlog_bytes"],

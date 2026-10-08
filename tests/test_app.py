@@ -13,6 +13,7 @@ from app import main
 def isolated_network_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'active', None)
     monkeypatch.setattr(main, 'youtube_player', None)
+    monkeypatch.setattr(main, 'AUDIO', main.audio_settings())
     monkeypatch.setitem(main.CONFIG, 'mode', 'simulation')
     monkeypatch.setattr(main, 'SETTINGS_PATH', tmp_path / 'settings.json')
     monkeypatch.setattr(main, 'MULTICAST', '239.192.55.1')
@@ -227,12 +228,35 @@ def test_native_server_port_http_only(monkeypatch):
         server_options()
 
 
-def test_websocket_queue_uses_audio_backlog_limit(monkeypatch):
+def test_websocket_queue_keeps_only_one_audio_block(monkeypatch):
     from app.serve import server_options
     monkeypatch.setenv('PLAYER_PORT', '8080')
     monkeypatch.setenv('PLAYER_AUDIO_BLOCK_MS', '10')
     monkeypatch.setenv('PLAYER_AUDIO_MAX_BACKLOG_MS', '100')
-    assert server_options()['ws_max_queue'] == 10
+    assert server_options()['ws_max_queue'] == 1
+
+
+def test_buffer_settings_persistence_and_validation(monkeypatch):
+    headers = {'origin': 'https://testserver'}
+    with client() as c:
+        body = {'block_ms': 10, 'max_backlog_ms': 100}
+        assert c.post('/api/settings/audio', json=body).status_code == 403
+        assert c.post('/api/settings/audio', json=body, headers=headers).json() == body
+        assert c.get('/api/status').json()['audio'] == body
+        assert main.load_audio()['pcm_bytes'] == 960
+        # Other settings writes must retain the saved buffer settings.
+        assert c.post('/api/settings/network', json={'multicast_address': '239.1.2.3'}, headers=headers).status_code == 200
+        assert main.load_audio()['max_backlog_ms'] == 100
+        for invalid in [{'block_ms': 100, 'max_backlog_ms': 100},
+                        {'block_ms': 9, 'max_backlog_ms': 100},
+                        {'block_ms': 20, 'max_backlog_ms': 1001},
+                        {'block_ms': 10.5, 'max_backlog_ms': 100}]:
+            assert c.post('/api/settings/audio', json=invalid, headers=headers).status_code == 422
+        assert main.load_audio()['block_ms'] == 10
+        monkeypatch.setattr(main, 'active', {'kind': 'youtube'})
+        assert c.post('/api/settings/audio', json=body, headers=headers).status_code == 409
+    with TestClient(main.app, base_url='https://testserver') as c:
+        assert c.post('/api/settings/audio', json=body, headers=headers).status_code == 401
 
 
 def test_zone_crud_and_combined_persistence():

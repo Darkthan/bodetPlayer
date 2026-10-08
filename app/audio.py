@@ -2,10 +2,10 @@
 import os
 
 
-def audio_settings():
+def audio_settings(values=None):
     try:
-        block = int(os.getenv("PLAYER_AUDIO_BLOCK_MS", "20"))
-        backlog = int(os.getenv("PLAYER_AUDIO_MAX_BACKLOG_MS", "200"))
+        block = int(values["block_ms"] if values is not None else os.getenv("PLAYER_AUDIO_BLOCK_MS", "20"))
+        backlog = int(values["max_backlog_ms"] if values is not None else os.getenv("PLAYER_AUDIO_MAX_BACKLOG_MS", "200"))
     except ValueError:
         raise ValueError("Les réglages de buffer audio doivent être des entiers en millisecondes.")
     if not 10 <= block <= 100:

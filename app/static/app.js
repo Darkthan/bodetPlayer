@@ -1,6 +1,7 @@
 const $ = id => document.getElementById(id);
 let socket, context, stream, processor, running = false, busy = false;
 let networkDirty = false;
+let audioDirty = false;
 let youtubeSignature = '';
 let librarySignature = '', draftQueue = [], musicStatus = null, draggedTrack = null, ordering = false;
 let selectedSounds = new Set(), playlistsSignature = '', selectedPlaylist = '';
@@ -27,6 +28,11 @@ async function refresh() {
     if (!networkDirty) $('multicast').value = status.multicast_address;
     $('multicast').disabled = !!status.active;
     $('saveNetwork').disabled = !!status.active;
+    $('audioFields').disabled = !!status.active;
+    if (!audioDirty && status.audio) {
+      $('audioBlock').value = status.audio.block_ms;
+      $('audioBacklog').value = status.audio.max_backlog_ms;
+    }
     $('mode').textContent = status.mode === 'simulation'
       ? 'Mode simulation : le son arrive au serveur, mais aucune enceinte ne reçoit de son. La passerelle Sigma / Harmonys reste à intégrer et valider.'
       : status.mode === 'bodet'
@@ -334,6 +340,23 @@ $('zoneForm').onsubmit = async event => {
   finally { $('saveZone').disabled = false; }
 };
 $('multicast').oninput = () => { networkDirty = true; $('networkStatus').textContent = ''; };
+for (const id of ['audioBlock', 'audioBacklog']) $(id).oninput = () => {
+  audioDirty = true; $('audioStatus').textContent = '';
+};
+for (const [id, block, backlog] of [['audioFast', 10, 100], ['audioBalanced', 20, 200], ['audioStable', 40, 500]]) {
+  $(id).onclick = () => {
+    $('audioBlock').value = block; $('audioBacklog').value = backlog;
+    audioDirty = true; $('audioStatus').textContent = 'Cliquez sur Enregistrer pour appliquer ce profil.';
+  };
+}
+$('audioForm').onsubmit = async event => {
+  event.preventDefault(); $('saveAudio').disabled = true;
+  try {
+    await api('settings/audio', {block_ms:Number($('audioBlock').value), max_backlog_ms:Number($('audioBacklog').value)});
+    audioDirty = false; $('audioStatus').textContent = 'Réglages enregistrés pour la prochaine diffusion.';
+  } catch (error) { $('audioStatus').textContent = error.message; }
+  finally { $('saveAudio').disabled = false; await refresh(); }
+};
 $('networkForm').onsubmit = async event => {
   event.preventDefault();
   $('saveNetwork').disabled = true;

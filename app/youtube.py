@@ -233,7 +233,7 @@ class YouTubePlayer:
 
     async def play(self, path, root):
         decoder = bridge = None
-        settings = audio_settings()
+        settings = audio_settings(self.session.get("audio"))
         # Logs go to files to avoid stderr pipe backpressure while forwarding PCM.
         with tempfile.TemporaryFile(dir=root) as errors:
             try:
@@ -247,6 +247,8 @@ class YouTubePlayer:
                                BODET_QUALITY=self.config.get("bodet_quality", "low"),
                                BODET_INTERFACE=self.config.get("bodet_interface", ""),
                                AUDIO_FORMAT="s16le", AUDIO_RATE="48000", AUDIO_CHANNELS="1")
+                    env["PLAYER_AUDIO_BLOCK_MS"] = str(settings["block_ms"])
+                    env["PLAYER_AUDIO_MAX_BACKLOG_MS"] = str(settings["max_backlog_ms"])
                     bridge = await spawn(*command, stdin=asyncio.subprocess.PIPE,
                                          stdout=asyncio.subprocess.DEVNULL, stderr=errors, env=env)
                     bridge.stdin.transport.set_write_buffer_limits(high=settings["max_backlog_bytes"],
