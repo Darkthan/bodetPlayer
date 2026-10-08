@@ -10,6 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from app.audio import audio_settings
 
 MAX_TRACKS = 100
 MAX_FILE_BYTES = 100 * 1024 * 1024
@@ -232,6 +233,7 @@ class YouTubePlayer:
 
     async def play(self, path, root):
         decoder = bridge = None
+        settings = audio_settings()
         # Logs go to files to avoid stderr pipe backpressure while forwarding PCM.
         with tempfile.TemporaryFile(dir=root) as errors:
             try:
@@ -247,6 +249,8 @@ class YouTubePlayer:
                                AUDIO_FORMAT="s16le", AUDIO_RATE="48000", AUDIO_CHANNELS="1")
                     bridge = await spawn(*command, stdin=asyncio.subprocess.PIPE,
                                          stdout=asyncio.subprocess.DEVNULL, stderr=errors, env=env)
+                    bridge.stdin.transport.set_write_buffer_limits(high=settings["max_backlog_bytes"],
+                                                                 low=settings["max_backlog_bytes"] // 2)
                 elif self.config["mode"] != "simulation":
                     raise ValueError("Mode audio inconnu.")
                 decoder = await spawn("ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
@@ -254,7 +258,7 @@ class YouTubePlayer:
                                       "-f", "s16le", "pipe:1", stdout=asyncio.subprocess.PIPE, stderr=errors)
                 self.state["status"] = "playing"
                 self.track_bytes = 0
-                while data := await decoder.stdout.read(1920):
+                while data := await decoder.stdout.read(settings["pcm_bytes"]):
                     self.session["bytes"] += len(data)
                     self.track_bytes += len(data)
                     if bridge:

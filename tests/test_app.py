@@ -126,6 +126,14 @@ def test_native_server_port_http_only(monkeypatch):
         server_options()
 
 
+def test_websocket_queue_uses_audio_backlog_limit(monkeypatch):
+    from app.serve import server_options
+    monkeypatch.setenv('PLAYER_PORT', '8080')
+    monkeypatch.setenv('PLAYER_AUDIO_BLOCK_MS', '10')
+    monkeypatch.setenv('PLAYER_AUDIO_MAX_BACKLOG_MS', '100')
+    assert server_options()['ws_max_queue'] == 10
+
+
 def test_zone_crud_and_combined_persistence():
     headers = {'origin': 'https://testserver'}
     with client() as c:

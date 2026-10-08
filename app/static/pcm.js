@@ -1,7 +1,10 @@
 class PCM extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
-    this.block = new Int16Array(960);
+    const frames = options?.processorOptions?.blockFrames ?? 960;
+    if (!Number.isInteger(frames) || frames < 480 || frames > 4800) throw new Error('Taille de bloc audio invalide.');
+    this.blockFrames = frames;
+    this.block = new Int16Array(this.blockFrames);
     this.offset = 0;
   }
   process(inputs, outputs) {
@@ -14,7 +17,7 @@ class PCM extends AudioWorkletProcessor {
         this.block[this.offset++] = value < 0 ? value * 32768 : value * 32767;
         if (this.offset === this.block.length) {
           this.port.postMessage(this.block.buffer, [this.block.buffer]);
-          this.block = new Int16Array(960);
+          this.block = new Int16Array(this.blockFrames);
           this.offset = 0;
         }
       }

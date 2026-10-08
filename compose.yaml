@@ -8,6 +8,8 @@ services:
       PLAYER_HOST: ${PLAYER_HOST:-127.0.0.1}
       PLAYER_PORT: ${PLAYER_PORT:-8080}
       PLAYER_ORIGIN: ${PLAYER_ORIGIN:-}
+      PLAYER_AUDIO_BLOCK_MS: ${PLAYER_AUDIO_BLOCK_MS:-20}
+      PLAYER_AUDIO_MAX_BACKLOG_MS: ${PLAYER_AUDIO_MAX_BACKLOG_MS:-200}
       PLAYER_CONFIG: /config/player.json
       PLAYER_SETTINGS: /data/settings.json
     volumes:

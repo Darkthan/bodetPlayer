@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StrictInt
 from app.youtube import Library, YouTubePlayer, youtube_url
+from app.audio import audio_settings
 
 STATIC = Path(__file__).parent / "static"
 CONFIG = json.loads(Path(os.getenv("PLAYER_CONFIG", "config/player.json")).read_text(encoding="utf-8"))
@@ -100,6 +101,7 @@ lock = asyncio.Lock()
 active = None
 youtube_player = None
 attempts = {}
+AUDIO = audio_settings()
 
 
 def valid(token):
@@ -217,7 +219,8 @@ async def status(request: Request):
     return {"mode": CONFIG["mode"], "zones": ZONES, "active": active,
             "multicast_address": MULTICAST,
             "youtube": youtube_player.snapshot() if youtube_player else None,
-            "library": audio_library().list()}
+            "library": audio_library().list(),
+            "audio": {"block_ms": AUDIO["block_ms"], "max_backlog_ms": AUDIO["max_backlog_ms"]}}
 
 
 async def youtube_finished(session):
@@ -427,6 +430,8 @@ async def live(ws: WebSocket):
             env["BODET_INTERFACE"] = CONFIG.get("bodet_interface", "")
             process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
                                                           stdout=asyncio.subprocess.DEVNULL, env=env)
+            process.stdin.transport.set_write_buffer_limits(high=AUDIO["max_backlog_bytes"],
+                                                           low=AUDIO["max_backlog_bytes"] // 2)
         elif CONFIG["mode"] != "simulation":
             raise ValueError("Mode audio inconnu.")
         await ws.send_json({"ready": True, "mode": CONFIG["mode"]})

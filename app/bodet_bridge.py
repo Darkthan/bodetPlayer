@@ -12,6 +12,13 @@ import struct
 import subprocess
 import sys
 import time
+from app.audio import audio_settings
+
+
+def next_deadline(previous, now, duration, max_lag):
+    # Preserve the audio clock instead of adding every scheduling delay to it.
+    # After a long source interruption, allow at most one block of catch-up.
+    return max(previous if previous is not None else now, now - max_lag) + duration
 
 
 def packet(sequence, zones, audio):
@@ -41,10 +48,13 @@ def main():
     if quality not in ("low", "high"):
         raise ValueError("Qualité Bodet invalide.")
     rate, bitrate = (32000, 64000) if quality == "low" else (48000, 256000)
+    settings = audio_settings()
+    block_seconds = settings["block_ms"] / 1000
+    mp3_bytes = min(1000, max(1, bitrate * settings["block_ms"] // 8000))
     encoder = subprocess.Popen([
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-probesize", "32", "-analyzeduration", "0",
-        "-f", "s16le", "-ar", "48000", "-ac", "1", "-blocksize", "1920", "-i", "pipe:0",
+        "-f", "s16le", "-ar", "48000", "-ac", "1", "-blocksize", str(settings["pcm_bytes"]), "-i", "pipe:0",
         "-ac", "1", "-ar", str(rate), "-c:a", "libmp3lame", "-b:a", str(bitrate),
         "-write_xing", "0", "-id3v2_version", "0", "-flush_packets", "1",
         "-f", "mp3", "pipe:1"], stdin=sys.stdin.buffer, stdout=subprocess.PIPE)
@@ -64,18 +74,16 @@ def main():
             sequence = 0
             deadline = None
             while True:
-                # Forward available encoder output without waiting for a full
-                # 1000-byte block (125 ms of MP3 at the default bitrate).
-                audio = encoder.stdout.read1(1000)
+                # Read available output in blocks capped by the chosen duration.
+                audio = encoder.stdout.read1(mp3_bytes)
                 if not audio:
                     break
                 now = time.monotonic()
-                deadline = max(deadline or now, now)
                 message = packet(sequence, zones, audio)
                 sender.sendto(message, (address, 1681))
                 sender.sendto(message, (address, 1681))
                 sequence += 1
-                deadline += len(audio) * 8 / bitrate
+                deadline = next_deadline(deadline, now, len(audio) * 8 / bitrate, block_seconds)
                 time.sleep(max(0, deadline - time.monotonic()))
         if encoder.wait(timeout=3):
             raise RuntimeError("Échec de l’encodage MP3.")

@@ -337,7 +337,8 @@ $('start').onclick = async () => {
       node = context.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
     }
     await context.audioWorklet.addModule('/static/pcm.js');
-    processor = new AudioWorkletNode(context, 'pcm');
+    const captureSettings = musicStatus?.audio || {block_ms:20, max_backlog_ms:200};
+    processor = new AudioWorkletNode(context, 'pcm', {processorOptions:{blockFrames:captureSettings.block_ms * 48}});
     socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/live`);
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Le serveur ne répond pas.')), 10000);
@@ -354,7 +355,9 @@ $('start').onclick = async () => {
     socket.onclose = () => { cleanup(); refresh(); };
     processor.port.onmessage = event => {
       if (socket?.readyState === WebSocket.OPEN) {
-        if (socket.bufferedAmount > 192000) { message('Réseau trop lent : diffusion arrêtée.'); cleanup(); }
+        if (socket.bufferedAmount + event.data.byteLength > captureSettings.max_backlog_ms * 96) {
+          message(`Plus de ${captureSettings.max_backlog_ms} ms de son en attente : diffusion arrêtée. Augmentez la limite de buffer si le réseau est instable.`); cleanup();
+        }
         else socket.send(event.data);
       }
     };

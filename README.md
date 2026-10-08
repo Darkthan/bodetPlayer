@@ -101,6 +101,26 @@ Si YouTube change et que yt-dlp nécessite une mise à jour, reconstruire les d�
 
 Le navigateur demande une faible latence audio. La passerelle limite l’analyse initiale de FFmpeg et transmet les blocs MP3 disponibles sans attendre de remplir 1000 octets (125 ms à 64 kbit/s). Le rythme de diffusion et le format MEL restent conservés. Le délai réel dépend aussi du navigateur, du réseau et des buffers des enceintes ; il doit être mesuré sur l’installation. Pour appliquer une mise à jour sur le serveur : `docker compose up -d --build --force-recreate`.
 
+Deux réglages dans `.env` permettent d’ajuster les buffers :
+
+```env
+PLAYER_AUDIO_BLOCK_MS=20
+PLAYER_AUDIO_MAX_BACKLOG_MS=200
+```
+
+`PLAYER_AUDIO_BLOCK_MS` fixe la taille des blocs PCM du navigateur et du décodage serveur, ainsi que le maximum de données MP3 lues avant un envoi multicast (limité à 1000 octets par paquet). Valeurs de 10 à 100 ms ; valeur initiale 20 ms. Pour un réseau stable, essayer 10 ms. Des blocs plus petits augmentent le nombre de messages et paquets. Ils ne réduisent pas la durée des trames du codec MP3 ni le buffer des enceintes.
+
+`PLAYER_AUDIO_MAX_BACKLOG_MS` borne le son en attente d’envoi dans le navigateur et dimensionne la file WebSocket ainsi que le seuil de contre-pression des pipes serveur. Valeurs de 40 à 1000 ms, au moins deux fois la taille du bloc ; valeur initiale 200 ms au lieu de l’ancien seuil navigateur de 2000 ms. Pour privilégier une faible latence, essayer 100 ms. Lorsque le navigateur dépasse cette limite, la capture s’arrête avec un message plutôt que d’accumuler du retard. Augmenter la limite en cas de coupures sur un réseau instable. Ce sont des limites par étape, et non une promesse de délai total ou un délai ajouté volontairement.
+
+La cadence multicast conserve une horloge audio continue pour éviter que les petits retards d’ordonnancement ne s’additionnent pendant une longue diffusion. Le buffer interne des enceintes Harmonys reste indépendant et n’est pas piloté par cette application. Le temps de téléchargement initial YouTube est également distinct du buffer de lecture. La réception et le délai final doivent être vérifiés sur les enceintes après un changement.
+
+Les fichiers Compose fournis transmettent ces variables au conteneur. Si vous utilisez un Compose personnalisé, ajoutez sous `environment` :
+
+```yaml
+      PLAYER_AUDIO_BLOCK_MS: ${PLAYER_AUDIO_BLOCK_MS:-20}
+      PLAYER_AUDIO_MAX_BACKLOG_MS: ${PLAYER_AUDIO_MAX_BACKLOG_MS:-200}
+```
+
 ### Son du PC dans Firefox
 
 Firefox ne fournit pas de piste audio avec le partage d’écran ou d’onglet. Choisir **Son du PC via une entrée audio (Firefox)**, puis **Autoriser et rechercher les entrées audio**. Autoriser l’accès aux entrées et sélectionner explicitement **Mixage stéréo**, si le pilote Windows le propose, ou une entrée de câble audio virtuel déjà configurée pour recevoir le son de YouTube. Démarrer ensuite la diffusion. Aucune entrée de bouclage n’est installée par l’application ; un microphone ordinaire ne remplace pas le bouclage. Tous les sons envoyés vers l’entrée choisie sont transmis. HTTPS (ou l’exception locale de confiance du navigateur) reste nécessaire. Chrome/Edge permettent le partage direct d’un onglet avec son audio.
