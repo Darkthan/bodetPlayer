@@ -159,7 +159,7 @@ $('start').onclick = async () => {
       stream = source === 'mic'
         ? await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
         : await navigator.mediaDevices.getDisplayMedia({video:true,audio:true,systemAudio:'include'});
-      if (!stream.getAudioTracks().length) throw new Error('Aucun son partagé. Choisissez une source proposant le partage audio et cochez cette option.');
+      if (!stream.getAudioTracks().length) throw new Error('Le navigateur n’a fourni aucune piste audio. Pour YouTube, utilisez Chrome ou Edge, choisissez « Onglet » puis cochez « Partager l’audio de l’onglet ». Firefox ne prend pas en charge cette capture audio ; utilisez un fichier audio ou le microphone.');
       stream.getTracks().forEach(track => track.onended = () => cleanup());
       node = context.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
     }
