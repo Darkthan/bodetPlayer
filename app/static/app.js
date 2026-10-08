@@ -3,7 +3,7 @@ let socket, context, stream, processor, running = false, busy = false;
 let networkDirty = false;
 let audioDirty = false;
 let agentsSignature = '';
-let youtubeSignature = '';
+let playerSignature = '';
 let librarySignature = '', draftQueue = [], musicStatus = null, draggedTrack = null, ordering = false;
 let selectedSounds = new Set(), playlistsSignature = '', selectedPlaylist = '';
 let queueSequence = 0;
@@ -60,10 +60,9 @@ async function refresh() {
       ? `${status.active.source} → zones ${status.active.zones.join(', ')} · ${(status.active.bytes / 96000).toFixed(1)} s reçues${status.mode === 'simulation' ? ' (simulation)' : ''}`
       : 'Aucune diffusion en cours.';
     $('start').disabled = !!status.active || busy || uploading;
-    $('playYoutube').disabled = !!status.active || busy || uploading;
     $('file').disabled = !!status.active || uploading;
     renderAgents(status);
-    renderYouTube(status);
+    renderPlayer(status);
   } catch (error) {
     $('login').hidden = false; $('dashboard').hidden = true;
     $('settingsButton').hidden = true;
@@ -79,45 +78,45 @@ async function cleanup() {
   if (context) { await context.close(); context = null; }
   busy = false; $('start').disabled = false;
 }
-function renderYouTube(status) {
+function renderPlayer(status) {
   musicStatus = status;
   const library = status.library || [];
   selectedSounds = new Set([...selectedSounds].filter(id => library.some(track => track.id === id)));
   renderPlaylists(status);
   draftQueue = draftQueue.filter(track => library.some(saved => saved.id === track.id));
-  const state = status.youtube;
-  const activeYouTube = status.active?.kind === 'youtube';
+  const state = status.player;
+  const activePlaylist = status.active?.kind === 'playlist';
   const source = document.querySelector('input[name=source]:checked').value;
-  $('youtubeSettings').hidden = !activeYouTube && source !== 'library';
+  $('playerSettings').hidden = !activePlaylist && source !== 'library';
 
-  $('youtubePrevious').disabled = !activeYouTube || !state?.queue.length;
-  $('youtubeNext').disabled = !activeYouTube || !state?.queue.length;
-  $('playerStop').disabled = !activeYouTube;
-  $('youtubeSettings').classList.toggle('is-playing', activeYouTube && state?.status === 'playing');
-  if (activeYouTube) $('youtubeLoop').value = state.loop;
-  const phases = {loading:'Chargement de la playlist…', downloading:'Téléchargement du son…', playing:'Lecture en cours', stopped:'Lecture terminée', error:'Lecture interrompue'};
-  const preview = !activeYouTube && source === 'library';
+  $('playerPrevious').disabled = !activePlaylist || !state?.queue.length;
+  $('playerNext').disabled = !activePlaylist || !state?.queue.length;
+  $('playerStop').disabled = !activePlaylist;
+  $('playerSettings').classList.toggle('is-playing', activePlaylist && state?.status === 'playing');
+  if (activePlaylist) $('playerLoop').value = state.loop;
+  const phases = {loading:'Chargement de la playlist…', playing:'Lecture en cours', stopped:'Lecture terminée', error:'Lecture interrompue'};
+  const preview = !activePlaylist && source === 'library';
   const queue = preview ? draftQueue : (state?.queue || []);
-  $('playerBadge').textContent = activeYouTube ? phases[state.status] : 'Prêt à diffuser';
-  $('playerTitle').textContent = activeYouTube ? state.title : (queue[0]?.title || 'Choisissez votre musique');
+  $('playerBadge').textContent = activePlaylist ? phases[state.status] : 'Prêt à diffuser';
+  $('playerTitle').textContent = activePlaylist ? state.title : (queue[0]?.title || 'Choisissez votre musique');
   const seconds = Math.floor(state?.elapsed || 0);
   const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
-  $('playerSubtitle').textContent = activeYouTube ? `Piste ${state.index + 1} sur ${state.queue.length} · ${clock} · zones ${status.active.zones.join(', ')}` : `${queue.length} piste(s) dans la file`;
+  $('playerSubtitle').textContent = activePlaylist ? `Piste ${state.index + 1} sur ${state.queue.length} · ${clock} · zones ${status.active.zones.join(', ')}` : `${queue.length} piste(s) dans la file`;
   const position = state?.queue.length ? ` · ${state.index + 1}/${state.queue.length}` : '';
-  $('youtubeStatus').textContent = state ? `${phases[state.status] || state.status}${position}${state.error ? ' · ' + state.error : ''}${state.warning && !state.error ? ' · ' + state.warning : ''}` : '';
+  $('playerStatus').textContent = state ? `${phases[state.status] || state.status}${position}${state.error ? ' · ' + state.error : ''}${state.warning && !state.error ? ' · ' + state.warning : ''}` : '';
   $('queueCount').textContent = `${queue.length} piste(s)`;
   $('queueEmpty').hidden = queue.length > 0;
-  const signature = JSON.stringify([queue, activeYouTube ? state.index : -1, activeYouTube, preview]);
-  if (signature !== youtubeSignature && !draggedTrack && !ordering) {
-    youtubeSignature = signature;
-    $('youtubeQueue').replaceChildren();
+  const signature = JSON.stringify([queue, activePlaylist ? state.index : -1, activePlaylist, preview]);
+  if (signature !== playerSignature && !draggedTrack && !ordering) {
+    playerSignature = signature;
+    $('playerQueue').replaceChildren();
     queue.forEach((track, index) => {
       const item = document.createElement('li');
       const label = document.createElement('span'); label.textContent = track.title;
       label.className = 'queue-title';
-      if (activeYouTube && index === state.index) item.setAttribute('aria-current', 'true');
+      if (activePlaylist && index === state.index) item.setAttribute('aria-current', 'true');
       item.append(label);
-      const editable = activeYouTube || preview;
+      const editable = activePlaylist || preview;
       item.draggable = editable;
       item.ondragstart = event => {
         draggedTrack = track.queue_id;
@@ -129,25 +128,25 @@ function renderYouTube(status) {
         event.preventDefault();
         const from = queue.findIndex(t => t.queue_id === draggedTrack);
         draggedTrack = null;
-        if (from >= 0) moveTrack(queue, from, index, activeYouTube);
+        if (from >= 0) moveTrack(queue, from, index, activePlaylist);
       };
-      item.ondragend = () => { draggedTrack = null; renderYouTube(musicStatus); };
+      item.ondragend = () => { draggedTrack = null; renderPlayer(musicStatus); };
       const actions = document.createElement('div'); actions.className = 'queue-actions';
       for (const [symbol, offset, title] of [['↑', -1, 'Monter'], ['↓', 1, 'Descendre']]) {
         const button = document.createElement('button'); button.type = 'button'; button.className = 'secondary';
         button.textContent = symbol; button.setAttribute('aria-label', `${title} ${track.title}`);
         button.disabled = !editable || index + offset < 0 || index + offset >= queue.length;
-        button.onclick = () => moveTrack(queue, index, index + offset, activeYouTube);
+        button.onclick = () => moveTrack(queue, index, index + offset, activePlaylist);
         actions.append(button);
       }
       if (preview) {
         const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'secondary'; remove.textContent = '×';
         remove.setAttribute('aria-label', `Retirer ${track.title} de la file`);
-        remove.onclick = () => { draftQueue = draftQueue.filter(t => t.queue_id !== track.queue_id); renderYouTube(musicStatus); };
+        remove.onclick = () => { draftQueue = draftQueue.filter(t => t.queue_id !== track.queue_id); renderPlayer(musicStatus); };
         actions.append(remove);
       }
       item.append(actions);
-      $('youtubeQueue').append(item);
+      $('playerQueue').append(item);
     });
   }
   $('libraryCount').textContent = `${library.length} piste(s)`;
@@ -163,7 +162,7 @@ function renderYouTube(status) {
       select.setAttribute('aria-label', `Sélectionner ${track.title}`);
       select.onchange = () => {
         if (select.checked) selectedSounds.add(track.id); else selectedSounds.delete(track.id);
-        renderYouTube(musicStatus);
+        renderPlayer(musicStatus);
       };
       const label = document.createElement('span'); label.textContent = track.title;
       const add = document.createElement('button'); add.type = 'button'; add.className = 'secondary';
@@ -174,7 +173,7 @@ function renderYouTube(status) {
         if (draftQueue.length >= 100) { message('Une playlist contient au maximum 100 pistes.'); return; }
         draftQueue.push({...track, queue_id:nextQueueId()});
         const radio = document.querySelector('input[name=source][value=library]'); radio.checked = true; radio.onchange();
-        renderYouTube(musicStatus);
+        renderPlayer(musicStatus);
       };
       const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'library-delete';
       remove.textContent = 'Supprimer'; remove.disabled = !!status.active;
@@ -253,11 +252,11 @@ $('savedPlaylist').onchange = () => {
   const library = musicStatus.library || [];
   draftQueue = (playlist?.tracks || []).map(id => library.find(track => track.id === id))
     .filter(Boolean).map(track => ({...track, queue_id:nextQueueId()}));
-  renderYouTube(musicStatus);
+  renderPlayer(musicStatus);
 };
 $('newPlaylist').onclick = () => {
   selectedPlaylist = ''; $('savedPlaylist').value = ''; $('playlistName').value = '';
-  draftQueue = []; renderYouTube(musicStatus); $('playlistName').focus();
+  draftQueue = []; renderPlayer(musicStatus); $('playlistName').focus();
 };
 $('savePlaylist').onclick = async () => {
   const name = $('playlistName').value.trim();
@@ -281,13 +280,13 @@ $('deletePlaylist').onclick = async () => {
 $('selectAllSounds').onclick = () => {
   const library = musicStatus.library || [];
   selectedSounds = selectedSounds.size === library.length ? new Set() : new Set(library.map(track => track.id));
-  renderYouTube(musicStatus);
+  renderPlayer(musicStatus);
 };
 $('addSelectedSounds').onclick = () => {
   const tracks = musicStatus.library.filter(track => selectedSounds.has(track.id) && !draftQueue.some(t => t.id === track.id));
   if (draftQueue.length + tracks.length > 100) { message('Une playlist contient au maximum 100 pistes.'); return; }
   draftQueue.push(...tracks.map(track => ({...track, queue_id:nextQueueId()})));
-  selectedSounds.clear(); renderYouTube(musicStatus);
+  selectedSounds.clear(); renderPlayer(musicStatus);
 };
 $('deleteSelectedSounds').onclick = async () => {
   const tracks = [...selectedSounds];
@@ -299,12 +298,12 @@ $('deleteSelectedSounds').onclick = async () => {
   } catch (error) { message(error.message); }
   await refresh();
 };
-async function moveTrack(queue, from, to, activeYouTube) {
+async function moveTrack(queue, from, to, activePlaylist) {
   if (ordering || from === to) return;
   const reordered = [...queue]; reordered.splice(to, 0, reordered.splice(from, 1)[0]);
   ordering = true;
   try {
-    if (activeYouTube) await api('youtube/order', {order:reordered.map(t => t.queue_id)});
+    if (activePlaylist) await api('player/order', {order:reordered.map(t => t.queue_id)});
     else draftQueue = reordered;
     message('');
   } catch (error) { message(error.message); }
@@ -314,17 +313,17 @@ $('playerStop').onclick = async () => {
   try { await api('stop', {}); await cleanup(); await refresh(); }
   catch (error) { message(error.message); }
 };
-for (const [button, action] of [['youtubePrevious', 'previous'], ['youtubeNext', 'next']]) {
+for (const [button, action] of [['playerPrevious', 'previous'], ['playerNext', 'next']]) {
   $(button).onclick = async () => {
     $(button).disabled = true;
-    try { await api('youtube/control', {action}); message(''); }
+    try { await api('player/control', {action}); message(''); }
     catch (error) { message(error.message); }
     finally { await refresh(); }
   };
 }
-$('youtubeLoop').onchange = async () => {
-  if (musicStatus?.active?.kind !== 'youtube') return;
-  try { await api('youtube/control', {action:'loop', loop:$('youtubeLoop').value}); }
+$('playerLoop').onchange = async () => {
+  if (musicStatus?.active?.kind !== 'playlist') return;
+  try { await api('player/control', {action:'loop', loop:$('playerLoop').value}); }
   catch (error) { message(error.message); }
   finally { await refresh(); }
 };
@@ -411,21 +410,21 @@ $('all').onclick = () => {
 };
 document.querySelectorAll('input[name=source]').forEach(input => input.onchange = () => {
   const source = document.querySelector('input[name=source]:checked').value;
-  $('youtubeSettings').hidden = source !== 'library';
+  $('playerSettings').hidden = source !== 'library';
   $('captureHint').hidden = source === 'library';
   $('agentSettings').hidden = source !== 'agent';
   if (source === 'agent') $('captureHint').hidden = true;
   $('captureHint').textContent = source === 'mic'
     ? 'Autorisez le microphone pour diffuser votre voix.'
-    : 'Dans Chrome ou Edge, choisissez un onglet et cochez « Partager l’audio de l’onglet ». Firefox ne permet pas cette capture ; utilisez la playlist pour YouTube.';
-  if (musicStatus) renderYouTube(musicStatus);
+    : 'Dans Chrome ou Edge, choisissez un onglet et cochez « Partager l’audio de l’onglet ». Firefox ne permet pas cette capture ; utilisez l’agent Windows pour le son du PC.';
+  if (musicStatus) renderPlayer(musicStatus);
 });
 let uploading = false;
 async function uploadAudioFiles(files) {
   if (uploading) return;
   if (busy || running || musicStatus?.active) { message('Arrêtez la diffusion avant d’importer des sons.'); return; }
   if (!files.length) return;
-  uploading = true; $('file').disabled = true; $('start').disabled = true; $('playYoutube').disabled = true;
+  uploading = true; $('file').disabled = true; $('start').disabled = true;
   const outcomes = [];
   try {
     for (const file of files) {
@@ -453,7 +452,7 @@ const isFileDrop = event => Array.from(event.dataTransfer?.types || []).includes
 document.addEventListener('dragover', event => {
   if (!isFileDrop(event)) return;
   event.preventDefault(); event.dataTransfer.dropEffect = $('dashboard').hidden ? 'none' : 'copy';
-  if (!$('youtubeSettings').hidden) $('fileDrop').classList.add('drag-over');
+  if (!$('playerSettings').hidden) $('fileDrop').classList.add('drag-over');
 });
 document.addEventListener('dragleave', event => {
   if (!event.relatedTarget) $('fileDrop').classList.remove('drag-over');
@@ -465,20 +464,6 @@ document.addEventListener('drop', event => {
   const radio = document.querySelector('input[name=source][value=library]'); radio.checked = true; radio.onchange();
   uploadAudioFiles(Array.from(event.dataTransfer.files));
 });
-$('playYoutube').onclick = async () => {
-  if (busy || running || uploading) return;
-  busy = true; $('playYoutube').disabled = true;
-  try {
-    if (networkDirty) throw new Error('Enregistrez l’adresse multicast avant de démarrer.');
-    const zones = [...$('zones').querySelectorAll('input:checked')].map(input => Number(input.value));
-    if (!zones.length) throw new Error('Sélectionnez au moins une zone.');
-    const url = $('youtubeUrl').value.trim();
-    if (!url) throw new Error('Saisissez un lien YouTube.');
-    await api('youtube/start', {url, zones, loop:$('youtubeLoop').value});
-    message('');
-  } catch (error) { message(error.message); }
-  finally { busy = false; $('playYoutube').disabled = false; await refresh(); }
-};
 $('start').onclick = async () => {
   if (busy || running || uploading) return;
   busy = true; $('start').disabled = true; message('');
@@ -494,7 +479,7 @@ $('start').onclick = async () => {
     }
     if (source === 'library') {
       if (!draftQueue.length) throw new Error('Ajoutez au moins une piste de la bibliothèque à la file.');
-      await api('library/start', {tracks:draftQueue.map(track => track.id), zones, loop:$('youtubeLoop').value});
+      await api('library/start', {tracks:draftQueue.map(track => track.id), zones, loop:$('playerLoop').value});
       busy = false;
       await refresh();
       return;
@@ -506,7 +491,7 @@ $('start').onclick = async () => {
     stream = source === 'mic'
       ? await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
       : await navigator.mediaDevices.getDisplayMedia({video:true,audio:true,systemAudio:'include'});
-    if (!stream.getAudioTracks().length) throw new Error('Aucun son partagé. Dans Chrome ou Edge, choisissez un onglet et cochez « Partager l’audio ». Pour YouTube dans Firefox, utilisez le lien dans Playlist.');
+    if (!stream.getAudioTracks().length) throw new Error('Aucun son partagé. Dans Chrome ou Edge, choisissez un onglet et cochez « Partager l’audio ». Dans Firefox, utilisez l’agent Windows pour le son du PC.');
     stream.getTracks().forEach(track => track.onended = () => cleanup());
     node = context.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
     await context.audioWorklet.addModule('/static/pcm.js');

@@ -15,7 +15,7 @@ def isolated_agents(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'SETTINGS_PATH', tmp_path / 'settings.json')
     monkeypatch.setattr(main, 'AGENTS', main.AgentRegistry(lambda: main.SETTINGS_PATH))
     monkeypatch.setattr(main, 'active', None)
-    monkeypatch.setattr(main, 'youtube_player', None)
+    monkeypatch.setattr(main, 'music_player', None)
     monkeypatch.setitem(main.CONFIG, 'mode', 'simulation')
     monkeypatch.setattr(main, 'ZONES', [{'id': 1, 'name': 'Salle'}])
     main.attempts.clear()
@@ -77,7 +77,7 @@ def test_agent_requires_web_command_then_relays_audio_and_stops():
                 with c.websocket_connect('/api/live', headers=auth) as duplicate:
                     duplicate.send_json({'agent_session': command['session']})
                     assert 'error' in duplicate.receive_json()
-                assert c.post('/api/youtube/start', json={'url':'https://youtu.be/abcdefghijk', 'zones':[1]}, headers=HEADERS).status_code in (409, 503)
+                assert c.post('/api/library/start', json={'tracks':['abcdefghijk'], 'zones':[1]}, headers=HEADERS).status_code in (409, 503)
                 assert c.post('/api/stop', json={}, headers=HEADERS).status_code == 200
                 assert control.receive_json()['command'] == 'stop'
                 audio.send_bytes(b'\x00\x00' * 480)

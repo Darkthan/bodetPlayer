@@ -1,4 +1,4 @@
-"""Server-side YouTube queue: bounded downloads, cancellable playback and repeat."""
+"""Server-side playback of uploaded audio: local library, queues and repeat."""
 import asyncio
 import json
 import os
@@ -9,71 +9,28 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 from app.audio import audio_settings
 
 MAX_TRACKS = 100
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_LIBRARY_BYTES = 1024 * 1024 * 1024
-VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
-PLAYLIST_ID = re.compile(r"^[A-Za-z0-9_-]{1,150}$")
-
-
-def youtube_url(value):
-    """Accept only video/playlist IDs and reconstruct a canonical YouTube URL."""
-    try:
-        url = urlsplit(value.strip())
-        if url.scheme not in ("http", "https") or url.username or url.password or url.port not in (None, 80, 443):
-            raise ValueError
-        if url.hostname not in ("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"):
-            raise ValueError
-        query = parse_qs(url.query)
-        playlist = query.get("list", [""])[0]
-        if playlist and PLAYLIST_ID.fullmatch(playlist):
-            return "https://www.youtube.com/playlist?list=" + playlist
-        video = url.path.strip("/") if url.hostname == "youtu.be" else query.get("v", [""])[0]
-        if url.path.startswith(("/shorts/", "/embed/")):
-            video = url.path.split("/")[2]
-        if not VIDEO_ID.fullmatch(video):
-            raise ValueError
-        return "https://www.youtube.com/watch?v=" + video
-    except (ValueError, IndexError):
-        raise ValueError("Saisissez un lien YouTube vers une vidéo ou une playlist.")
-
-
-def queue_from_info(info):
-    entries = info.get("entries") if "entries" in info else [info]
-    tracks = []
-    for entry in (entries or [])[:MAX_TRACKS]:
-        if not entry or not VIDEO_ID.fullmatch(str(entry.get("id", ""))):
-            continue
-        if entry.get("is_live") or entry.get("live_status") in ("is_live", "is_upcoming"):
-            continue
-        if entry.get("duration") and entry["duration"] > 3600:
-            continue
-        track = {"id": entry["id"], "title": str(entry.get("title") or entry["id"])[:200]}
-        if entry.get("duration"):
-            track["duration"] = entry["duration"]
-        tracks.append(track)
-    if not tracks:
-        raise ValueError("Aucune piste lisible dans ce lien (vidéos publiques, hors direct, de moins d’une heure).")
-    return tracks
+TRACK_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
 class Library:
     def __init__(self, directory):
         self.directory = Path(directory)
 
-    def get(self, video_id):
-        if not VIDEO_ID.fullmatch(video_id):
+    def get(self, track_id):
+        if not TRACK_ID.fullmatch(track_id):
             raise ValueError("Identifiant de piste invalide.")
         try:
-            track = json.loads((self.directory / (video_id + ".json")).read_text(encoding="utf-8"))
+            track = json.loads((self.directory / (track_id + ".json")).read_text(encoding="utf-8"))
             filename = track["filename"]
-            if not re.fullmatch(re.escape(video_id) + r"\.(?:webm|m4a|mp3|ogg|opus|wav|aac|mp4)", filename):
+            if not re.fullmatch(re.escape(track_id) + r"\.(?:webm|m4a|mp3|ogg|opus|wav|aac|mp4)", filename):
                 raise ValueError
             path = self.directory / filename
-            if track["id"] != video_id or not path.is_file():
+            if track["id"] != track_id or not path.is_file():
                 raise ValueError
             return track, path
         except (OSError, ValueError, KeyError, TypeError):
@@ -102,10 +59,10 @@ class Library:
         temporary.replace(manifest)
         return target
 
-    def delete(self, video_id):
-        _, path = self.get(video_id)
+    def delete(self, track_id):
+        _, path = self.get(track_id)
         path.unlink()
-        (self.directory / (video_id + ".json")).unlink()
+        (self.directory / (track_id + ".json")).unlink()
 
 
 async def terminate(process):
@@ -131,43 +88,14 @@ async def spawn(*args, **kwargs):
     return await asyncio.create_subprocess_exec(*args, **kwargs, start_new_session=os.name == "posix")
 
 
-def ytdlp_command():
-    return [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-plugin-dirs",
-            "--no-cache-dir", "--js-runtimes", "node", "--socket-timeout", "15",
-            "--retries", "2", "--fragment-retries", "2", "--no-progress", "--no-warnings"]
-
-
-async def command_output(command, timeout, directory=None):
-    process = await spawn(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    output = asyncio.create_task(process.communicate())
-    started = time.monotonic()
-    try:
-        while not output.done():
-            if time.monotonic() - started > timeout:
-                raise ValueError("YouTube ne répond pas dans le délai prévu. Réessayez ou passez au suivant.")
-            if directory and sum(p.stat().st_size for p in directory.iterdir() if p.is_file()) > MAX_FILE_BYTES:
-                raise ValueError("Cette piste dépasse la limite de téléchargement de 100 Mio.")
-            await asyncio.wait({output}, timeout=0.2)
-        stdout, stderr = await output
-        if process.returncode:
-            detail = stderr.decode("utf-8", errors="replace").strip()[-600:]
-            raise ValueError("Erreur yt-dlp : " + (detail or "vidéo indisponible"))
-        return stdout
-    finally:
-        await terminate(process)
-        if not output.done():
-            output.cancel()
-        await asyncio.gather(output, return_exceptions=True)
-
-
-class YouTubePlayer:
+class AudioPlayer:
     def __init__(self, session, config, directory, finished):
         self.session = session
         self.config = dict(config)
         self.directory = Path(directory)
         self.finished = finished
         self.state = {"status": "loading", "queue": [], "index": 0, "loop": "off",
-                      "title": "Chargement YouTube", "error": "", "warning": ""}
+                      "title": "Chargement audio", "error": "", "warning": ""}
         self.changed = asyncio.Event()
         self.task = None
         self.library = Library(self.directory / "library")
@@ -175,10 +103,6 @@ class YouTubePlayer:
 
     def snapshot(self):
         return dict(self.state, elapsed=self.track_bytes / 96000)
-
-    def start(self, url, repeat):
-        self.state["loop"] = repeat
-        self.task = asyncio.create_task(self.run(url))
 
     def start_tracks(self, tracks, repeat):
         self.state["loop"] = repeat
@@ -195,7 +119,7 @@ class YouTubePlayer:
 
     def navigate(self, offset):
         if not self.state["queue"] or self.state["status"] in ("stopped", "error"):
-            raise ValueError("Aucune file YouTube en cours.")
+            raise ValueError("Aucune playlist en cours.")
         self.state["index"] = (self.state["index"] + offset) % len(self.state["queue"])
         self.changed.set()
 
@@ -207,29 +131,6 @@ class YouTubePlayer:
         if self.state["status"] not in ("stopped", "error"):
             self.state["status"] = "stopped"
         await self.finished(self.session)
-
-    async def download(self, track, root):
-        video_id = track["id"]
-        try:
-            _, path = self.library.get(video_id)
-            return path
-        except ValueError:
-            pass
-        if sum(p.stat().st_size for p in self.library.directory.glob("*") if p.is_file()) > MAX_LIBRARY_BYTES - MAX_FILE_BYTES:
-            raise ValueError("Bibliothèque pleine (1 Gio). Supprimez des pistes téléchargées pour libérer de la place.")
-        self.state["status"] = "downloading"
-        with tempfile.TemporaryDirectory(prefix="download-", dir=root) as temporary:
-            folder = Path(temporary)
-            await command_output(ytdlp_command() + [
-                "--no-playlist", "--abort-on-error", "-f", "bestaudio",
-                "--max-filesize", str(MAX_FILE_BYTES), "--match-filter", "!is_live & duration <= 3600",
-                "-o", str(folder / "audio.%(ext)s"), "--", "https://www.youtube.com/watch?v=" + video_id,
-            ], 300, directory=folder)
-            files = [p for p in folder.glob("audio.*") if p.suffix not in (".part", ".ytdl") and p.stat().st_size]
-            if len(files) != 1 or files[0].stat().st_size > MAX_FILE_BYTES:
-                raise ValueError("Piste indisponible, trop longue ou trop volumineuse.")
-            target = self.library.save(track, files[0])
-        return target
 
     async def play(self, path, root):
         decoder = bridge = None
@@ -269,7 +170,7 @@ class YouTubePlayer:
                         bridge.stdin.write(data)
                         await asyncio.wait_for(bridge.stdin.drain(), 3)
                 if await decoder.wait():
-                    raise ValueError("Le fichier YouTube ne peut pas être décodé.")
+                    raise ValueError("Le fichier audio ne peut pas être décodé.")
                 if bridge:
                     bridge.stdin.close()
                     if await asyncio.wait_for(bridge.wait(), 5):
@@ -282,24 +183,21 @@ class YouTubePlayer:
                 errors.seek(0)
                 detail = errors.read().decode("utf-8", errors="replace").strip()[-600:]
                 if detail:
-                    print("YouTube audio: " + detail, file=sys.stderr)
+                    print("audio audio: " + detail, file=sys.stderr)
 
     async def item(self, track, root):
-        path = await self.download(track, root)
+        _, path = self.library.get(track["id"])
         await self.play(path, root)
 
-    async def run(self, url=None, tracks=None):
+    async def run(self, tracks):
         item_task = event_task = None
         temporary = None
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
-            temporary = tempfile.TemporaryDirectory(prefix="youtube-", dir=self.directory)
+            temporary = tempfile.TemporaryDirectory(prefix="playback-", dir=self.directory)
             root = Path(temporary.name)
-            if tracks is None:
-                info = json.loads(await command_output(ytdlp_command() + [
-                    "--flat-playlist", "--playlist-end", str(MAX_TRACKS), "--dump-single-json", "--", url,
-                ], 90))
-                tracks = queue_from_info(info)
+            if not tracks or len(tracks) > MAX_TRACKS:
+                raise ValueError("Choisissez de 1 à 100 pistes de la bibliothèque.")
             self.state["queue"] = [dict(track, queue_id=secrets.token_hex(8)) for track in tracks]
             failures = 0
             while True:
@@ -308,7 +206,7 @@ class YouTubePlayer:
                 track = self.state["queue"][index]
                 self.track_bytes = 0
                 self.state["title"] = track["title"]
-                self.session["source"] = "YouTube · " + track["title"]
+                self.session["source"] = "Playlist · " + track["title"]
                 item_task = asyncio.create_task(self.item(track, root))
                 event_task = asyncio.create_task(self.changed.wait())
                 done, _ = await asyncio.wait({item_task, event_task}, return_when=asyncio.FIRST_COMPLETED)

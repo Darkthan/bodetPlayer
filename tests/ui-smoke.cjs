@@ -11,7 +11,7 @@ const assert = require('node:assert/strict');
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     const state = {mode:'simulation', zones:[{id:1, name:'Salle'}], active:null,
-      multicast_address:'239.1.2.3', youtube:null, audio:{block_ms:20, max_backlog_ms:200},
+      multicast_address:'239.1.2.3', player:null, audio:{block_ms:20, max_backlog_ms:200},
       agents:[{id:'pc1', name:'PC musique', online:true, status:'idle', error:''}],
       playlists:[], library:[{id:'abcdefghijk', title:'Première chanson', size:1000},
                {id:'12345678901', title:'Deuxième chanson', size:2000}]};
@@ -47,20 +47,20 @@ const assert = require('node:assert/strict');
           state.library = state.library.filter(t => !body.tracks.includes(t.id));
           state.playlists.forEach(p => p.tracks = p.tracks.filter(id => !body.tracks.includes(id)));
         } else if (url.pathname === '/api/library/start') {
-          state.active = {kind:'youtube', source:'Bibliothèque', zones:body.zones, bytes:96000};
-          state.youtube = {status:'playing', loop:body.loop, index:0, error:'', warning:'',
+          state.active = {kind:'playlist', source:'Bibliothèque', zones:body.zones, bytes:96000};
+          state.player = {status:'playing', loop:body.loop, index:0, error:'', warning:'',
             queue:body.tracks.map((id, index) => ({...state.library.find(t => t.id === id), queue_id:'q' + index}))};
-          state.youtube.title = state.youtube.queue[0].title;
-        } else if (url.pathname === '/api/youtube/order') {
-          const current = state.youtube.queue[state.youtube.index].queue_id;
-          state.youtube.queue = body.order.map(id => state.youtube.queue.find(t => t.queue_id === id));
-          state.youtube.index = body.order.indexOf(current);
-        } else if (url.pathname === '/api/youtube/control') {
-          if (body.action === 'loop') state.youtube.loop = body.loop;
-          else state.youtube.index = (state.youtube.index + (body.action === 'next' ? 1 : -1) + state.youtube.queue.length) % state.youtube.queue.length;
-          state.youtube.title = state.youtube.queue[state.youtube.index].title;
+          state.player.title = state.player.queue[0].title;
+        } else if (url.pathname === '/api/player/order') {
+          const current = state.player.queue[state.player.index].queue_id;
+          state.player.queue = body.order.map(id => state.player.queue.find(t => t.queue_id === id));
+          state.player.index = body.order.indexOf(current);
+        } else if (url.pathname === '/api/player/control') {
+          if (body.action === 'loop') state.player.loop = body.loop;
+          else state.player.index = (state.player.index + (body.action === 'next' ? 1 : -1) + state.player.queue.length) % state.player.queue.length;
+          state.player.title = state.player.queue[state.player.index].title;
         } else if (url.pathname === '/api/stop') {
-          state.active = null; state.youtube.status = 'stopped';
+          state.active = null; state.player.status = 'stopped';
         } else if (request.method() === 'DELETE') {
           state.library = state.library.filter(t => t.id !== url.pathname.split('/').pop());
         }
@@ -73,6 +73,8 @@ const assert = require('node:assert/strict');
     });
     await page.goto('http://bodet-ui.test/');
     assert.equal(await page.locator('input[name=source]').count(), 4);
+    assert.equal(await page.locator('#youtubeUrl').count(), 0);
+    assert.equal(await page.locator('input[name=source][value=library]').isChecked(), true);
     assert.equal(await page.evaluate(() => window.isSecureContext), false);
     await page.locator('#settingsButton').click();
     await page.locator('#audioFast').click();
@@ -88,29 +90,29 @@ const assert = require('node:assert/strict');
     await page.locator('#zones input').check();
     await page.locator('#start').click();
     await page.locator('#playerTitle').filter({hasText:'Deuxième chanson'}).waitFor();
-    assert.equal(state.youtube.queue[0].id, '12345678901');
+    assert.equal(state.player.queue[0].id, '12345678901');
     await page.locator('#settingsButton').click();
     assert.equal(await page.locator('#audioBlock').isDisabled(), true);
     await page.locator('#closeSettings').click();
     // Move the current track and verify playback remains on that track.
     await page.getByRole('button', {name:'Descendre Deuxième chanson', exact:true}).click();
-    assert.equal(state.youtube.index, 1);
+    assert.equal(state.player.index, 1);
     assert.equal(await page.locator('#playerTitle').textContent(), 'Deuxième chanson');
-    await page.locator('#youtubeQueue li').nth(1).dragTo(page.locator('#youtubeQueue li').nth(0));
+    await page.locator('#playerQueue li').nth(1).dragTo(page.locator('#playerQueue li').nth(0));
     await page.waitForFunction(() => document.querySelector('.queue-title')?.textContent === 'Deuxième chanson');
-    assert.equal(state.youtube.index, 0);
-    const loopResponse = page.waitForResponse(response => response.url().endsWith('/api/youtube/control'));
-    await page.locator('#youtubeLoop').selectOption('playlist');
+    assert.equal(state.player.index, 0);
+    const loopResponse = page.waitForResponse(response => response.url().endsWith('/api/player/control'));
+    await page.locator('#playerLoop').selectOption('playlist');
     await loopResponse;
-    assert.equal(state.youtube.loop, 'playlist');
-    const nextResponse = page.waitForResponse(response => response.url().endsWith('/api/youtube/control'));
-    await page.locator('#youtubeNext').click();
+    assert.equal(state.player.loop, 'playlist');
+    const nextResponse = page.waitForResponse(response => response.url().endsWith('/api/player/control'));
+    await page.locator('#playerNext').click();
     await nextResponse;
-    assert.equal(state.youtube.index, 1);
-    const previousResponse = page.waitForResponse(response => response.url().endsWith('/api/youtube/control'));
-    await page.locator('#youtubePrevious').click();
+    assert.equal(state.player.index, 1);
+    const previousResponse = page.waitForResponse(response => response.url().endsWith('/api/player/control'));
+    await page.locator('#playerPrevious').click();
     await previousResponse;
-    assert.equal(state.youtube.index, 0);
+    assert.equal(state.player.index, 0);
     fs.mkdirSync(path.join(__dirname, '..', '.benchmarks'), {recursive:true});
     await page.screenshot({path:path.join(__dirname, '..', '.benchmarks', 'player-desktop.png'), fullPage:true});
     await page.setViewportSize({width:390, height:844});

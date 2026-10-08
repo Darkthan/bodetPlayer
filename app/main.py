@@ -1,6 +1,5 @@
 """Audio PCM relay with native Harmonys streaming and external bridge support."""
 import asyncio
-import importlib.util
 import hashlib
 import hmac
 import ipaddress
@@ -20,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StrictInt
-from app.youtube import Library, YouTubePlayer, youtube_url, MAX_FILE_BYTES, MAX_LIBRARY_BYTES, spawn, terminate
+from app.playback import Library, AudioPlayer, MAX_FILE_BYTES, MAX_LIBRARY_BYTES, spawn, terminate
 from app.audio import audio_settings
 from app.agents import AgentRegistry
 
@@ -94,15 +93,15 @@ KEY = secrets.token_bytes(32)
 @asynccontextmanager
 async def lifespan(application):
     yield
-    if youtube_player:
-        await youtube_player.stop()
+    if music_player:
+        await music_player.stop()
 
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 lock = asyncio.Lock()
 active = None
-youtube_player = None
+music_player = None
 attempts = {}
 def load_audio():
     settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8")) if SETTINGS_PATH.exists() else {}
@@ -170,13 +169,7 @@ class ZoneSettings(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 
 
-class YouTubeStart(BaseModel):
-    url: str = Field(min_length=1, max_length=2048)
-    zones: list[StrictInt] = Field(min_length=1, max_length=100)
-    loop: Literal["off", "track", "playlist"] = "off"
-
-
-class YouTubeControl(BaseModel):
+class PlayerControl(BaseModel):
     action: Literal["previous", "next", "loop"]
     loop: Literal["off", "track", "playlist"] = "off"
 
@@ -220,6 +213,7 @@ def save_playlists(playlists):
 
 
 def audio_library():
+    # Preserve the existing library location across updates.
     return Library(SETTINGS_PATH.parent / "youtube" / "library")
 
 
@@ -269,66 +263,40 @@ async def status(request: Request):
     authorize(request)
     return {"mode": CONFIG["mode"], "zones": ZONES, "active": active,
             "multicast_address": MULTICAST,
-            "youtube": youtube_player.snapshot() if youtube_player else None,
+            "player": music_player.snapshot() if music_player else None,
             "library": audio_library().list(),
             "playlists": saved_playlists(),
             "agents": AGENTS.snapshot(),
             "audio": {"block_ms": AUDIO["block_ms"], "max_backlog_ms": AUDIO["max_backlog_ms"]}}
 
 
-async def youtube_finished(session):
+async def playback_finished(session):
     global active
     async with lock:
         if active is session:
             active = None
 
 
-@app.post("/api/youtube/start")
-async def youtube_start(body: YouTubeStart, request: Request):
-    global active, youtube_player
-    same_origin(request)
-    authorize(request)
-    try:
-        url = youtube_url(body.url)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc))
-    if not importlib.util.find_spec("yt_dlp") or not shutil.which("ffmpeg"):
-        raise HTTPException(503, "Reconstruisez l’image Docker pour installer yt-dlp et FFmpeg.")
-    async with lock:
-        if active:
-            raise HTTPException(409, "Une diffusion est déjà en cours. Arrêtez-la avant de charger YouTube.")
-        if any(zone not in {z["id"] for z in ZONES} for zone in body.zones):
-            raise HTTPException(422, "Sélectionnez des zones valides.")
-        session = {"zones": sorted(set(body.zones)), "bytes": 0, "stop": False,
-                   "source": "YouTube", "kind": "youtube", "started": time.time(),
-                   "multicast_address": MULTICAST, "audio": dict(AUDIO)}
-        player = YouTubePlayer(session, CONFIG, SETTINGS_PATH.parent / "youtube", youtube_finished)
-        active = session
-        youtube_player = player
-        player.start(url, body.loop)
-    return player.snapshot()
-
-
-@app.post("/api/youtube/control")
-async def youtube_control(body: YouTubeControl, request: Request):
+@app.post("/api/player/control")
+async def player_control(body: PlayerControl, request: Request):
     same_origin(request)
     authorize(request)
     async with lock:
-        if not active or active.get("kind") != "youtube" or not youtube_player:
-            raise HTTPException(409, "Aucune lecture YouTube en cours.")
+        if not active or active.get("kind") != "playlist" or not music_player:
+            raise HTTPException(409, "Aucune playlist en cours.")
         if body.action == "loop":
-            youtube_player.state["loop"] = body.loop
+            music_player.state["loop"] = body.loop
         else:
             try:
-                youtube_player.navigate(1 if body.action == "next" else -1)
+                music_player.navigate(1 if body.action == "next" else -1)
             except ValueError as exc:
                 raise HTTPException(409, str(exc))
-        return youtube_player.snapshot()
+        return music_player.snapshot()
 
 
 @app.post("/api/library/start")
 async def library_start(body: LibraryStart, request: Request):
-    global active, youtube_player
+    global active, music_player
     same_origin(request)
     authorize(request)
     if not shutil.which("ffmpeg"):
@@ -343,27 +311,27 @@ async def library_start(body: LibraryStart, request: Request):
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         session = {"zones": sorted(set(body.zones)), "bytes": 0, "stop": False,
-                   "source": "Bibliothèque", "kind": "youtube", "started": time.time(),
+                   "source": "Bibliothèque", "kind": "playlist", "started": time.time(),
                    "multicast_address": MULTICAST, "audio": dict(AUDIO)}
-        player = YouTubePlayer(session, CONFIG, SETTINGS_PATH.parent / "youtube", youtube_finished)
+        player = AudioPlayer(session, CONFIG, SETTINGS_PATH.parent / "youtube", playback_finished)
         active = session
-        youtube_player = player
+        music_player = player
         player.start_tracks(tracks, body.loop)
     return player.snapshot()
 
 
-@app.post("/api/youtube/order")
-async def youtube_order(body: QueueOrder, request: Request):
+@app.post("/api/player/order")
+async def player_order(body: QueueOrder, request: Request):
     same_origin(request)
     authorize(request)
     async with lock:
-        if not active or active.get("kind") != "youtube" or not youtube_player or not youtube_player.state["queue"]:
+        if not active or active.get("kind") != "playlist" or not music_player or not music_player.state["queue"]:
             raise HTTPException(409, "Aucune file en cours.")
         try:
-            youtube_player.reorder(body.order)
+            music_player.reorder(body.order)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
-        return youtube_player.snapshot()
+        return music_player.snapshot()
 
 
 @app.post("/api/library/upload")
@@ -707,8 +675,8 @@ async def stop(request: Request):
     authorize(request)
     if active:
         active["stop"] = True
-        if active.get("kind") == "youtube" and youtube_player:
-            await youtube_player.stop()
+        if active.get("kind") == "playlist" and music_player:
+            await music_player.stop()
         elif active.get("kind") == "agent":
             connection = AGENTS.connections.get(active["agent_id"])
             if connection:

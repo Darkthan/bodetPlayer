@@ -62,7 +62,7 @@ PLAYER_ORIGIN=http://172.17.150.125,https://player.example.fr
 
 Remplacer le domaine par celui de votre reverse proxy. Ajouter le port à chaque adresse s’il n’est pas le port standard, par exemple `http://172.17.150.125:8080`. Les espaces autour des virgules sont acceptés ; les chemins, jokers et adresses autres que HTTP/HTTPS sont refusés. Une ancienne configuration avec une seule origine reste compatible. Chaque origine déclarée peut se connecter, contrôler la lecture et ouvrir la connexion audio WebSocket. Les cookies des sessions HTTPS restent `Secure`, avec un nom distinct des cookies HTTP pour permettre les deux accès sur le même nom de serveur. Aucune confiance n’est accordée aux en-têtes de proxy pour décider de cette protection : le protocole de l’origine autorisée utilisée à la connexion fait foi.
 
-Le HTTP local permet la lecture YouTube et de la bibliothèque côté serveur. La capture du microphone ou du son du PC nécessite toujours HTTPS, une adresse locale de boucle ou une exception de confiance du navigateur.
+Le HTTP local permet la lecture des fichiers de la bibliothèque côté serveur. La capture du microphone ou du son du PC nécessite toujours HTTPS, une adresse locale de boucle ou une exception de confiance du navigateur.
 
 Après modification de `.env`, relancer Compose. Restreindre l’accès au port HTTP au reverse proxy si nécessaire. Le mot de passe est commun aux opérateurs ; les sessions durent huit heures et sont invalidées au redémarrage. La capture sur une IP LAN nécessite l’accès HTTPS par votre proxy. Le test local `http://127.0.0.1:8080` fonctionne sur le PC hébergeant l’application. La configuration fournie active la diffusion Bodet : vérifier les zones et le multicast avant de démarrer. L’émission multicast depuis Docker Desktop vers le LAN reste à valider ; privilégier Linux en réseau hôte pour la diffusion.
 
@@ -72,13 +72,13 @@ Cliquer sur le bouton bleu **Paramètres** en bas à droite. Dans **Configuratio
 
 Ouvrir l’interface sur le PC source, se connecter, sélectionner les zones puis une source et démarrer. Le partage du son système dépend du navigateur et du système : choisir une surface proposant l’audio et activer le partage audio. Un onglet audio peut être utilisé si la capture système n’est pas proposée. Le navigateur impose une autorisation à chaque partage ; un autre PC ne peut pas capturer le son à distance sans participation du PC source.
 
-Les sources sont **Micro**, **Playlist**, **Onglet externe** et **Son du PC (agent Windows)**. Pour le micro et l’onglet, garder la page ouverte : sa fermeture coupe la session. Pour partager le son d’un onglet, utiliser Chrome ou Edge et cocher le partage audio ; Firefox ne fournit pas ce son. La playlist et l’agent Windows fonctionnent dans Firefox. Un opérateur connecté peut arrêter la diffusion depuis son interface. Une seule source peut diffuser à la fois.
+Les sources sont **Micro**, **Playlist**, **Onglet externe** et **Son du PC (agent Windows)**. Pour le micro et l’onglet, garder la page ouverte : sa fermeture coupe la session. Pour partager le son d’un onglet, utiliser Chrome ou Edge et cocher le partage audio ; Firefox ne fournit pas ce son. Les fichiers importés et l’agent Windows fonctionnent dans Firefox. Un opérateur connecté peut arrêter la diffusion depuis son interface. Une seule source peut diffuser à la fois.
 
 Dans le même panneau, **Gérer les zones** permet d’ajouter, modifier ou supprimer une zone. Chaque zone possède un numéro unique entre 1 et 100 et un nom. Les zones sont conservées avec l’adresse multicast dans le volume Docker. Les réglages sont bloqués pendant une diffusion. Les changements mettent à jour la liste des zones sans recharger la page ; ils ne reconfigurent pas la centrale Sigma.
 
-## YouTube, playlists et bibliothèque
+## Import de fichiers, playlists et bibliothèque
 
-Choisir **Playlist**, coller le lien d’une vidéo ou d’une playlist publique, sélectionner les zones puis cliquer sur **Lire le lien YouTube**. Le serveur charge la liste avec **yt-dlp**, télécharge le son de chaque piste au moment de la lire et diffuse via FFmpeg et la passerelle Bodet. Le lecteur propose **Précédent**, **Suivant**, **Arrêter** et trois modes de boucle : désactivée, piste actuelle ou playlist entière. Le passage manuel précédent/suivant revient à l’autre extrémité de la file lorsqu’on atteint une limite. Une vidéo indisponible est signalée et la lecture passe à la suivante ; une file entièrement indisponible s’arrête.
+Choisir **Playlist**, déposer les fichiers audio dans la bibliothèque ou cliquer sur **Importer des sons**. Les imports acceptent plusieurs fichiers et sont ajoutés à la file. Choisir les zones puis **Démarrer la diffusion**. Le lecteur propose **Précédent**, **Suivant**, **Arrêter** et trois modes de boucle : désactivée, piste actuelle ou playlist entière. Une piste illisible est signalée et la lecture passe à la suivante ; une file entièrement illisible s’arrête.
 
 La **file de lecture** se réordonne par glisser-déposer ou avec les flèches, sans interrompre la piste en cours. Après le réordonnancement, le passage automatique suit le nouvel ordre. Les doublons d’une playlist sont conservés.
 
@@ -86,22 +86,20 @@ La **file de lecture** se réordonne par glisser-déposer ou avec les flèches, 
 
 Dans la bibliothèque, cocher plusieurs sons ou utiliser **Tout sélectionner**, puis **Ajouter la sélection à la file** ou **Supprimer la sélection**. La suppression multiple demande confirmation, efface les fichiers et retire leurs références de toutes les playlists. La suppression individuelle fait de même. Arrêter la diffusion avant de modifier les playlists ou de supprimer des sons.
 
-Les sons restent dans la **bibliothèque** du volume `player_data` (`/data/youtube/library`). Pour les relire sans Internet, ajouter les pistes à une file, choisir la source **Playlist**, régler leur ordre et démarrer. Les téléchargements terminés sont conservés après arrêt et redémarrage ; la file active et la lecture ne sont pas restaurées après un redémarrage du serveur. La suppression d’une piste de la bibliothèque nécessite l’arrêt de la diffusion. `docker compose down -v` efface aussi ces fichiers.
+Les sons restent dans la **bibliothèque** du volume `player_data` (`/data/youtube/library`). Pour les relire, ajouter les pistes à une file, choisir la source **Playlist**, régler leur ordre et démarrer. Les fichiers importés sont conservés après arrêt et redémarrage ; la file active et la lecture ne sont pas restaurées après un redémarrage du serveur. La suppression d’une piste de la bibliothèque nécessite l’arrêt de la diffusion. `docker compose down -v` efface aussi ces fichiers.
 
-Les sons importés et YouTube sont diffusés directement par le serveur : Firefox et HTTP fonctionnent sans partage d’écran, sans microphone et sans exception de contexte sécurisé. Fermer la page ou se déconnecter n’arrête pas cette lecture ; utiliser **Arrêter** pour la couper. Une seule source (YouTube, bibliothèque ou capture navigateur) peut diffuser à la fois.
+Les fichiers de la bibliothèque sont diffusés directement par le serveur : Firefox et HTTP fonctionnent sans partage d’écran, sans microphone et sans exception de contexte sécurisé. Fermer la page ou se déconnecter n’arrête pas cette lecture ; utiliser **Arrêter** pour la couper. Une seule source (playlist, agent Windows ou capture navigateur) peut diffuser à la fois.
 
 Dans **Playlist**, déposer les sons ou cliquer sur **Importer des sons**. Les imports acceptent plusieurs fichiers, 100 Mio par fichier, avec conversion MP3 et conservation de la première heure de chaque son. Les sons sont conservés sur le serveur et ajoutés automatiquement à la file. Arrêter la diffusion avant un import. La bibliothèque est limitée à 1 Gio. Le dépôt ne déclenche aucune lecture dans le navigateur.
 
-Limites : 100 pistes par file, une heure et 100 Mio par piste, bibliothèque de 1 Gio. Le téléchargement est limité à cinq minutes par piste et peut être interrompu avec Suivant ou Arrêter. Les fichiers temporaires sont nettoyés à l’arrêt normal. Une piste trop volumineuse ou un direct n’est pas téléchargé. Les liens avec un paramètre `list` chargent la playlist entière (dans la limite de 100 pistes). Les vidéos privées, les restrictions YouTube et les demandes de connexion peuvent empêcher le téléchargement ; le message yt-dlp est affiché dans le lecteur. Aucun cookie de compte n’est utilisé.
+Limites : 100 pistes par file, une heure et 100 Mio par fichier, bibliothèque de 1 Gio. La conversion d’un fichier est limitée à cinq minutes. La lecture utilise uniquement les fichiers présents sur le serveur : aucun lien vidéo ni téléchargement distant n’est proposé. Les fichiers et playlists déjà enregistrés sont conservés lors de la mise à jour, y compris dans le dossier historique `/data/youtube/library`.
 
-L’image inclut FFmpeg, Node.js 22 et `yt-dlp[default]` avec ses composants JavaScript. Le serveur doit pouvoir accéder à Internet pour de nouveaux téléchargements. Mettre à jour et reconstruire l’image :
+L’image inclut FFmpeg pour convertir et lire les fichiers audio. Mise à jour :
 
 ```sh
 git pull
 docker compose up -d --build --force-recreate
 ```
-
-Si YouTube change et que yt-dlp nécessite une mise à jour, reconstruire les dépendances avec `docker compose build --no-cache`, puis `docker compose up -d --force-recreate`.
 
 ## Délai de diffusion
 
@@ -120,7 +118,7 @@ PLAYER_AUDIO_MAX_BACKLOG_MS=200
 
 `PLAYER_AUDIO_MAX_BACKLOG_MS` borne le son en attente d’envoi dans le navigateur et règle le seuil de contre-pression des pipes serveur. La file de réception WebSocket reste limitée à un bloc pour éviter une attente supplémentaire indépendante des réglages. Valeurs de 40 à 1000 ms, au moins deux fois la taille du bloc ; valeur initiale 200 ms. Pour privilégier une faible latence, essayer 100 ms. Lorsque le navigateur dépasse cette limite, la capture s’arrête avec un message plutôt que d’accumuler du retard. Augmenter la limite en cas de coupures sur un réseau instable. Ce sont des limites par étape, et non une promesse de délai total ou un délai ajouté volontairement.
 
-La cadence multicast conserve une horloge audio continue pour éviter que les petits retards d’ordonnancement ne s’additionnent pendant une longue diffusion. Le buffer interne des enceintes Harmonys reste indépendant et n’est pas piloté par cette application. Le temps de téléchargement initial YouTube est également distinct du buffer de lecture. La réception et le délai final doivent être vérifiés sur les enceintes après un changement.
+La cadence multicast conserve une horloge audio continue pour éviter que les petits retards d’ordonnancement ne s’additionnent pendant une longue diffusion. Le buffer interne des enceintes Harmonys reste indépendant et n’est pas piloté par cette application. La réception et le délai final doivent être vérifiés sur les enceintes après un changement.
 
 Les fichiers Compose fournis transmettent ces variables au conteneur. Si vous utilisez un Compose personnalisé, ajoutez sous `environment` :
 
@@ -131,7 +129,7 @@ Les fichiers Compose fournis transmettent ces variables au conteneur. Si vous ut
 
 ### Son du PC dans Firefox
 
-Firefox ne fournit pas de piste audio avec le partage d’écran ou d’onglet. Pour YouTube, utiliser **Playlist** et le lien YouTube. Pour tous les sons du PC, utiliser **Son du PC (agent Windows)**. Aucun câble audio virtuel ni Mixage stéréo n’est nécessaire. Chrome/Edge permettent aussi le partage direct d’un onglet avec son audio.
+Firefox ne fournit pas de piste audio avec le partage d’écran ou d’onglet. Pour des fichiers audio, utiliser **Playlist** et importer les sons. Pour tous les sons du PC, utiliser **Son du PC (agent Windows)**. Aucun câble audio virtuel ni Mixage stéréo n’est nécessaire. Chrome/Edge permettent aussi le partage direct d’un onglet avec son audio.
 
 ### Agent Windows et contrôle depuis le navigateur
 
@@ -170,4 +168,4 @@ docker compose down
 
 Tests locaux : `python -m pytest tests`. Installer `pytest` et `httpx` en plus de `requirements.txt` dans l’environnement de développement. Les tests couvrent l’authentification, les zones, l’exclusion de deux diffusions et l’arrêt. La validation sur les enceintes et le protocole restent nécessaires avant tout usage réel.
 
-Les tests couvrent aussi les playlists, les boucles, les contrôles YouTube, le réordonnancement, la persistance de la bibliothèque, les limites de téléchargement et le décodage FFmpeg. Les tests réseau utilisent des métadonnées simulées pour rester indépendants de YouTube. Le test d’interface `node tests/ui-smoke.cjs` nécessite Playwright et Microsoft Edge ; il vérifie les commandes, le glisser-déposer, la file de bibliothèque et l’affichage mobile avec une API simulée.
+Les tests couvrent aussi les playlists, les boucles, les contrôles du lecteur, le réordonnancement, la persistance de la bibliothèque, les limites d’import et le décodage FFmpeg. Les tests de lecture utilisent des fichiers audio locaux et des pistes simulées. Le test d’interface `node tests/ui-smoke.cjs` nécessite Playwright et Microsoft Edge ; il vérifie les commandes, le glisser-déposer, la file de bibliothèque et l’affichage mobile avec une API simulée.
