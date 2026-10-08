@@ -128,9 +128,31 @@ $('all').onclick = () => {
   const value = !boxes.every(box => box.checked); boxes.forEach(box => box.checked = value);
 };
 document.querySelectorAll('input[name=source]').forEach(input => input.onchange = () => {
-  const file = document.querySelector('input[name=source]:checked').value === 'file';
+  const source = document.querySelector('input[name=source]:checked').value;
+  const file = source === 'file';
   $('file').hidden = !file; $('audio').hidden = !file;
+  $('loopbackSettings').hidden = source !== 'loopback';
 });
+$('listAudioInputs').onclick = async () => {
+  if (busy || running) return;
+  $('listAudioInputs').disabled = true;
+  let permissionStream;
+  try {
+    if (!window.isSecureContext) throw new Error('Utilisez HTTPS ou déclarez cette adresse fiable dans Firefox avant de rechercher les entrées.');
+    permissionStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    const inputs = (await navigator.mediaDevices.enumerateDevices()).filter(device => device.kind === 'audioinput' && device.deviceId);
+    const previous = $('audioInput').value;
+    $('audioInput').replaceChildren(new Option('Choisissez Mixage stéréo ou une entrée virtuelle', ''));
+    inputs.forEach((device, index) => $('audioInput').append(new Option(device.label || `Entrée audio ${index + 1}`, device.deviceId)));
+    if (inputs.some(device => device.deviceId === previous)) $('audioInput').value = previous;
+    $('audioInputStatus').textContent = 'Choisissez explicitement l’entrée de bouclage. Si elle est absente, activez-la dans Windows puis recherchez à nouveau. Un microphone capte la pièce, pas le son de YouTube.';
+  } catch (error) {
+    $('audioInputStatus').textContent = error.message;
+  } finally {
+    permissionStream?.getTracks().forEach(track => track.stop());
+    $('listAudioInputs').disabled = false;
+  }
+};
 $('file').onchange = () => {
   if (objectURL) URL.revokeObjectURL(objectURL);
   const file = $('file').files[0];
@@ -156,8 +178,10 @@ $('start').onclick = async () => {
       node = context.createMediaElementSource(audio);
       audio.onended = () => cleanup();
     } else {
-      stream = source === 'mic'
-        ? await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
+      if (source === 'loopback' && !$('audioInput').value) throw new Error('Recherchez les entrées audio et choisissez Mixage stéréo ou une entrée virtuelle.');
+      stream = source === 'mic' || source === 'loopback'
+        ? await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,
+            ...(source === 'loopback' ? {deviceId:{exact:$('audioInput').value}} : {})}})
         : await navigator.mediaDevices.getDisplayMedia({video:true,audio:true,systemAudio:'include'});
       if (!stream.getAudioTracks().length) throw new Error('Le navigateur n’a fourni aucune piste audio. Pour YouTube, utilisez Chrome ou Edge, choisissez « Onglet » puis cochez « Partager l’audio de l’onglet ». Firefox ne prend pas en charge cette capture audio ; utilisez un fichier audio ou le microphone.');
       stream.getTracks().forEach(track => track.onended = () => cleanup());

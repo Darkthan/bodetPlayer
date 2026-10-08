@@ -68,6 +68,10 @@ Dans le même panneau, **Gérer les zones** permet d’ajouter, modifier ou supp
 
 ## Délai de diffusion
 
+### Son du PC dans Firefox
+
+Firefox ne fournit pas de piste audio avec le partage d’écran ou d’onglet. Choisir **Son du PC via une entrée audio (Firefox)**, puis **Autoriser et rechercher les entrées audio**. Autoriser l’accès aux entrées et sélectionner explicitement **Mixage stéréo**, si le pilote Windows le propose, ou une entrée de câble audio virtuel déjà configurée pour recevoir le son de YouTube. Démarrer ensuite la diffusion. Aucune entrée de bouclage n’est installée par l’application ; un microphone ordinaire ne remplace pas le bouclage. Tous les sons envoyés vers l’entrée choisie sont transmis. HTTPS (ou l’exception locale de confiance du navigateur) reste nécessaire. Chrome/Edge permettent le partage direct d’un onglet avec son audio.
+
 Le navigateur demande une faible latence audio. La passerelle limite l’analyse initiale de FFmpeg et transmet les blocs MP3 disponibles sans attendre de remplir 1000 octets (125 ms à 64 kbit/s). Le rythme de diffusion et le format MEL restent conservés. Le délai réel dépend aussi du navigateur, du réseau et des buffers des enceintes ; il doit être mesuré sur l’installation. Pour appliquer une mise à jour sur le serveur : `docker compose up -d --build --force-recreate`.
 
 ## Passerelle externe facultative
