@@ -66,13 +66,34 @@ Pour un fichier audio, choisir un fichier local : il est décodé et transmis en
 
 Dans le même panneau, **Gérer les zones** permet d’ajouter, modifier ou supprimer une zone. Chaque zone possède un numéro unique entre 1 et 100 et un nom. Les zones sont conservées avec l’adresse multicast dans le volume Docker. Les réglages sont bloqués pendant une diffusion. Les changements mettent à jour la liste des zones sans recharger la page ; ils ne reconfigurent pas la centrale Sigma.
 
+## YouTube, playlists et bibliothèque
+
+Choisir **YouTube / Playlist**, coller le lien d’une vidéo ou d’une playlist publique, sélectionner les zones puis démarrer. Le serveur charge la liste avec **yt-dlp**, télécharge le son de chaque piste au moment de la lire et diffuse via FFmpeg et la passerelle Bodet. Le lecteur propose **Précédent**, **Suivant**, **Arrêter** et trois modes de boucle : désactivée, piste actuelle ou playlist entière. Le passage manuel précédent/suivant revient à l’autre extrémité de la file lorsqu’on atteint une limite. Une vidéo indisponible est signalée et la lecture passe à la suivante ; une file entièrement indisponible s’arrête.
+
+La **file de lecture** se réordonne par glisser-déposer ou avec les flèches, sans interrompre la piste en cours. Après le réordonnancement, le passage automatique suit le nouvel ordre. Les doublons d’une playlist sont conservés.
+
+Les sons restent dans la **bibliothèque** du volume `player_data` (`/data/youtube/library`). Pour les relire sans Internet, ajouter les pistes à une file, choisir la source **Bibliothèque**, régler leur ordre et démarrer. Les téléchargements terminés sont conservés après arrêt et redémarrage ; la file active et la lecture ne sont pas restaurées après un redémarrage du serveur. La suppression d’une piste de la bibliothèque nécessite l’arrêt de la diffusion. `docker compose down -v` efface aussi ces fichiers.
+
+Ces deux sources sont diffusées directement par le serveur : Firefox et HTTP fonctionnent sans partage d’écran, sans microphone et sans exception de contexte sécurisé. Fermer la page ou se déconnecter n’arrête pas cette lecture ; utiliser **Arrêter** pour la couper. Une seule source (YouTube, bibliothèque ou capture navigateur) peut diffuser à la fois.
+
+Limites : 100 pistes par file, une heure et 100 Mio par piste, bibliothèque de 1 Gio. Le téléchargement est limité à cinq minutes par piste et peut être interrompu avec Suivant ou Arrêter. Les fichiers temporaires sont nettoyés à l’arrêt normal. Une piste trop volumineuse ou un direct n’est pas téléchargé. Les liens avec un paramètre `list` chargent la playlist entière (dans la limite de 100 pistes). Les vidéos privées, les restrictions YouTube et les demandes de connexion peuvent empêcher le téléchargement ; le message yt-dlp est affiché dans le lecteur. Aucun cookie de compte n’est utilisé.
+
+L’image inclut FFmpeg, Node.js 22 et `yt-dlp[default]` avec ses composants JavaScript. Le serveur doit pouvoir accéder à Internet pour de nouveaux téléchargements. Mettre à jour et reconstruire l’image :
+
+```sh
+git pull
+docker compose up -d --build --force-recreate
+```
+
+Si YouTube change et que yt-dlp nécessite une mise à jour, reconstruire les dépendances avec `docker compose build --no-cache`, puis `docker compose up -d --force-recreate`.
+
 ## Délai de diffusion
+
+Le navigateur demande une faible latence audio. La passerelle limite l’analyse initiale de FFmpeg et transmet les blocs MP3 disponibles sans attendre de remplir 1000 octets (125 ms à 64 kbit/s). Le rythme de diffusion et le format MEL restent conservés. Le délai réel dépend aussi du navigateur, du réseau et des buffers des enceintes ; il doit être mesuré sur l’installation. Pour appliquer une mise à jour sur le serveur : `docker compose up -d --build --force-recreate`.
 
 ### Son du PC dans Firefox
 
 Firefox ne fournit pas de piste audio avec le partage d’écran ou d’onglet. Choisir **Son du PC via une entrée audio (Firefox)**, puis **Autoriser et rechercher les entrées audio**. Autoriser l’accès aux entrées et sélectionner explicitement **Mixage stéréo**, si le pilote Windows le propose, ou une entrée de câble audio virtuel déjà configurée pour recevoir le son de YouTube. Démarrer ensuite la diffusion. Aucune entrée de bouclage n’est installée par l’application ; un microphone ordinaire ne remplace pas le bouclage. Tous les sons envoyés vers l’entrée choisie sont transmis. HTTPS (ou l’exception locale de confiance du navigateur) reste nécessaire. Chrome/Edge permettent le partage direct d’un onglet avec son audio.
-
-Le navigateur demande une faible latence audio. La passerelle limite l’analyse initiale de FFmpeg et transmet les blocs MP3 disponibles sans attendre de remplir 1000 octets (125 ms à 64 kbit/s). Le rythme de diffusion et le format MEL restent conservés. Le délai réel dépend aussi du navigateur, du réseau et des buffers des enceintes ; il doit être mesuré sur l’installation. Pour appliquer une mise à jour sur le serveur : `docker compose up -d --build --force-recreate`.
 
 ## Passerelle externe facultative
 
@@ -94,3 +115,5 @@ docker compose down
 ```
 
 Tests locaux : `python -m pytest tests`. Installer `pytest` et `httpx` en plus de `requirements.txt` dans l’environnement de développement. Les tests couvrent l’authentification, les zones, l’exclusion de deux diffusions et l’arrêt. La validation sur les enceintes et le protocole restent nécessaires avant tout usage réel.
+
+Les tests couvrent aussi les playlists, les boucles, les contrôles YouTube, le réordonnancement, la persistance de la bibliothèque, les limites de téléchargement et le décodage FFmpeg. Les tests réseau utilisent des métadonnées simulées pour rester indépendants de YouTube. Le test d’interface `node tests/ui-smoke.cjs` nécessite Playwright et Microsoft Edge ; il vérifie les commandes, le glisser-déposer, la file de bibliothèque et l’affichage mobile avec une API simulée.

@@ -11,6 +11,8 @@ from app import main
 
 @pytest.fixture(autouse=True)
 def isolated_network_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, 'active', None)
+    monkeypatch.setattr(main, 'youtube_player', None)
     monkeypatch.setitem(main.CONFIG, 'mode', 'simulation')
     monkeypatch.setattr(main, 'SETTINGS_PATH', tmp_path / 'settings.json')
     monkeypatch.setattr(main, 'MULTICAST', '239.192.55.1')
@@ -153,3 +155,79 @@ def test_zone_security_and_live_lock():
             assert ws.receive_json()['ready']
             assert c.delete('/api/settings/zones/1', headers=headers).status_code == 409
             assert c.post('/api/settings/zones', json={'id': 9, 'name': 'Salle'}, headers=headers).status_code == 409
+
+
+def test_youtube_queue_controls_and_shared_exclusion(monkeypatch):
+    import asyncio
+    from app import youtube
+
+    original_spec = main.importlib.util.find_spec
+    monkeypatch.setattr(main.importlib.util, 'find_spec', lambda name: object() if name == 'yt_dlp' else original_spec(name))
+
+    async def metadata(*args, **kwargs):
+        return json.dumps({'entries': [{'id': 'abcdefghijk', 'title': 'A'},
+                                      {'id': '12345678901', 'title': 'B'}]}).encode()
+
+    async def item(self, track, root):
+        self.state['status'] = 'playing'
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(youtube, 'command_output', metadata)
+    monkeypatch.setattr(youtube.YouTubePlayer, 'item', item)
+    headers = {'origin': 'https://testserver'}
+    with client() as c:
+        assert c.post('/api/youtube/start', json={'url': 'https://youtu.be/abcdefghijk', 'zones': [1]}, headers=headers).status_code == 200
+        assert c.post('/api/youtube/start', json={'url': 'https://youtu.be/abcdefghijk', 'zones': [1]}, headers=headers).status_code == 409
+        state = c.get('/api/status').json()['youtube']
+        assert [track['title'] for track in state['queue']] == ['A', 'B']
+        order = [track['queue_id'] for track in state['queue']][::-1]
+        assert c.post('/api/youtube/order', json={'order': order}, headers=headers).json()['index'] == 1
+        assert c.post('/api/youtube/order', json={'order': [order[0], order[0]]}, headers=headers).status_code == 409
+        assert c.post('/api/youtube/control', json={'action': 'loop', 'loop': 'playlist'}, headers=headers).json()['loop'] == 'playlist'
+        assert c.post('/api/youtube/control', json={'action': 'next'}, headers=headers).status_code == 200
+        with c.websocket_connect('wss://testserver/api/live', headers=headers) as ws:
+            ws.send_json({'zones': [1]})
+            assert 'déjà' in ws.receive_json()['error']
+        assert c.post('/api/stop', json={}, headers=headers).status_code == 200
+        assert c.get('/api/status').json()['active'] is None
+
+
+def test_youtube_security_and_validation():
+    headers = {'origin': 'https://testserver'}
+    body = {'url': 'https://youtu.be/abcdefghijk', 'zones': [1]}
+    with TestClient(main.app, base_url='https://testserver') as c:
+        assert c.post('/api/youtube/start', json=body, headers=headers).status_code == 401
+    with client() as c:
+        assert c.post('/api/youtube/start', json=body).status_code == 403
+        assert c.post('/api/youtube/control', json={'action': 'next'}).status_code == 403
+        assert c.post('/api/youtube/order', json={'order': ['x']}).status_code == 403
+        assert c.post('/api/youtube/start', json=dict(body, url='http://127.0.0.1'), headers=headers).status_code == 422
+        assert c.post('/api/youtube/start', json=dict(body, zones=[True]), headers=headers).status_code == 422
+
+
+def test_library_persistence_playback_order_and_delete(tmp_path, monkeypatch):
+    import asyncio
+    from app import youtube
+    library = main.audio_library()
+    for video_id, title in [('abcdefghijk', 'A'), ('12345678901', 'B')]:
+        source = tmp_path / 'audio.webm'
+        source.write_bytes(b'audio')
+        library.save({'id': video_id, 'title': title}, source)
+
+    async def item(self, track, root):
+        self.state['status'] = 'playing'
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(youtube.YouTubePlayer, 'item', item)
+    headers = {'origin': 'https://testserver'}
+    with client() as c:
+        assert len(c.get('/api/status').json()['library']) == 2
+        assert c.post('/api/library/start', json={'tracks': ['12345678901', 'abcdefghijk'], 'zones': [1]}, headers=headers).status_code == 200
+        state = c.get('/api/status').json()['youtube']
+        assert [track['title'] for track in state['queue']] == ['B', 'A']
+        assert c.delete('/api/library/abcdefghijk', headers=headers).status_code == 409
+        assert c.post('/api/stop', json={}, headers=headers).status_code == 200
+        assert c.delete('/api/library/abcdefghijk').status_code == 403
+        assert c.delete('/api/library/abcdefghijk', headers=headers).status_code == 200
+        assert len(c.get('/api/status').json()['library']) == 1
+        assert c.post('/api/library/start', json={'tracks': ['abcdefghijk'], 'zones': [1]}, headers=headers).status_code == 422

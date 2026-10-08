@@ -4,3 +4,6 @@ certs
 tests
 __pycache__
 .pytest_cache
+.test-deps
+.benchmarks
+data

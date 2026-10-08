@@ -1,0 +1,92 @@
+// Run with a local Playwright installation (or PLAYWRIGHT_MODULE pointing to it).
+const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+
+(async () => {
+  const browser = await chromium.launch({channel:'msedge', headless:true});
+  try {
+    const page = await browser.newPage({viewport:{width:1280, height:1000}});
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    const state = {mode:'simulation', zones:[{id:1, name:'Salle'}], active:null,
+      multicast_address:'239.1.2.3', youtube:null,
+      library:[{id:'abcdefghijk', title:'Première chanson', size:1000},
+               {id:'12345678901', title:'Deuxième chanson', size:2000}]};
+    await page.route('**/*', async route => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname.startsWith('/api/')) {
+        const body = request.postDataJSON();
+        if (url.pathname === '/api/library/start') {
+          state.active = {kind:'youtube', source:'Bibliothèque', zones:body.zones, bytes:96000};
+          state.youtube = {status:'playing', loop:body.loop, index:0, error:'', warning:'',
+            queue:body.tracks.map((id, index) => ({...state.library.find(t => t.id === id), queue_id:'q' + index}))};
+          state.youtube.title = state.youtube.queue[0].title;
+        } else if (url.pathname === '/api/youtube/order') {
+          const current = state.youtube.queue[state.youtube.index].queue_id;
+          state.youtube.queue = body.order.map(id => state.youtube.queue.find(t => t.queue_id === id));
+          state.youtube.index = body.order.indexOf(current);
+        } else if (url.pathname === '/api/youtube/control') {
+          if (body.action === 'loop') state.youtube.loop = body.loop;
+          else state.youtube.index = (state.youtube.index + (body.action === 'next' ? 1 : -1) + state.youtube.queue.length) % state.youtube.queue.length;
+          state.youtube.title = state.youtube.queue[state.youtube.index].title;
+        } else if (url.pathname === '/api/stop') {
+          state.active = null; state.youtube.status = 'stopped';
+        } else if (request.method() === 'DELETE') {
+          state.library = state.library.filter(t => t.id !== url.pathname.split('/').pop());
+        }
+        await route.fulfill({json:url.pathname === '/api/status' ? state : {ok:true}});
+      } else {
+        const relative = url.pathname === '/' ? 'index.html' : url.pathname.replace('/static/', '');
+        const contentType = relative.endsWith('.js') ? 'text/javascript' : relative.endsWith('.css') ? 'text/css' : 'text/html';
+        await route.fulfill({body:fs.readFileSync(path.join(__dirname, '..', 'app', 'static', relative)), contentType});
+      }
+    });
+    await page.goto('http://bodet-ui.test/');
+    assert.equal(await page.evaluate(() => window.isSecureContext), false);
+    await page.locator('input[name=source][value=library]').check();
+    await page.getByRole('button', {name:'Ajouter Première chanson à la file', exact:true}).click();
+    await page.getByRole('button', {name:'Ajouter Deuxième chanson à la file', exact:true}).click();
+    await page.getByRole('button', {name:'Monter Deuxième chanson', exact:true}).click();
+    assert.deepEqual(await page.locator('.queue-title').allTextContents(), ['Deuxième chanson', 'Première chanson']);
+    await page.locator('#zones input').check();
+    await page.locator('#start').click();
+    await page.locator('#playerTitle').filter({hasText:'Deuxième chanson'}).waitFor();
+    assert.equal(state.youtube.queue[0].id, '12345678901');
+    // Move the current track and verify playback remains on that track.
+    await page.getByRole('button', {name:'Descendre Deuxième chanson', exact:true}).click();
+    assert.equal(state.youtube.index, 1);
+    assert.equal(await page.locator('#playerTitle').textContent(), 'Deuxième chanson');
+    await page.locator('#youtubeQueue li').nth(1).dragTo(page.locator('#youtubeQueue li').nth(0));
+    await page.waitForFunction(() => document.querySelector('.queue-title')?.textContent === 'Deuxième chanson');
+    assert.equal(state.youtube.index, 0);
+    const loopResponse = page.waitForResponse(response => response.url().endsWith('/api/youtube/control'));
+    await page.locator('#youtubeLoop').selectOption('playlist');
+    await loopResponse;
+    assert.equal(state.youtube.loop, 'playlist');
+    const nextResponse = page.waitForResponse(response => response.url().endsWith('/api/youtube/control'));
+    await page.locator('#youtubeNext').click();
+    await nextResponse;
+    assert.equal(state.youtube.index, 1);
+    const previousResponse = page.waitForResponse(response => response.url().endsWith('/api/youtube/control'));
+    await page.locator('#youtubePrevious').click();
+    await previousResponse;
+    assert.equal(state.youtube.index, 0);
+    fs.mkdirSync(path.join(__dirname, '..', '.benchmarks'), {recursive:true});
+    await page.screenshot({path:path.join(__dirname, '..', '.benchmarks', 'player-desktop.png'), fullPage:true});
+    await page.setViewportSize({width:390, height:844});
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({path:path.join(__dirname, '..', '.benchmarks', 'player-mobile.png'), fullPage:true});
+    await page.locator('#playerStop').click();
+    assert.equal(state.active, null);
+    page.on('dialog', dialog => dialog.accept());
+    await page.getByRole('button', {name:'Supprimer Première chanson de la bibliothèque', exact:true}).click();
+    assert.equal(state.library.length, 1);
+    assert.deepEqual(errors, []);
+    console.log('UI passed: HTTP playback, library, draft/live reorder, drag/drop, repeat, navigation, stop, delete, mobile layout.');
+  } finally {
+    await browser.close();
+  }
+})().catch(error => {console.error(error); process.exitCode = 1;});
