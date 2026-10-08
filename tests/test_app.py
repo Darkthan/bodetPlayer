@@ -101,15 +101,16 @@ def test_invalid_audio_releases_session():
 
 
 def test_http_login_and_websocket(monkeypatch):
-    monkeypatch.setattr(main, 'ORIGIN', 'http://127.0.0.1:9080')
+    origin = 'http://127.0.0.1:9080'
+    monkeypatch.setattr(main, 'ORIGINS', frozenset([origin]))
     main.attempts.clear()
     with TestClient(main.app, base_url='http://127.0.0.1:9080') as c:
         response = c.post('/api/login', json={'password': 'test-password'},
-                          headers={'origin': main.ORIGIN})
+                          headers={'origin': origin})
         assert response.status_code == 200
         assert 'Secure' not in response.headers['set-cookie']
         assert c.get('/api/status').status_code == 200
-        with c.websocket_connect('ws://127.0.0.1:9080/api/live', headers={'origin': main.ORIGIN}) as ws:
+        with c.websocket_connect('ws://127.0.0.1:9080/api/live', headers={'origin': origin}) as ws:
             ws.send_json({'zones': [1]})
             assert ws.receive_json()['ready']
 
@@ -203,6 +204,47 @@ def test_youtube_security_and_validation():
         assert c.post('/api/youtube/order', json={'order': ['x']}).status_code == 403
         assert c.post('/api/youtube/start', json=dict(body, url='http://127.0.0.1'), headers=headers).status_code == 422
         assert c.post('/api/youtube/start', json=dict(body, zones=[True]), headers=headers).status_code == 422
+
+
+@pytest.mark.parametrize('value', ['*', 'ftp://player.test', 'https://player.test/path',
+                                   'https://user:password@player.test', 'https://player.test?x=1',
+                                   'https://player.test:99999', ', ,'])
+def test_invalid_origin_configuration(value):
+    with pytest.raises(ValueError, match='PLAYER_ORIGIN'):
+        main.allowed_origins(value)
+
+
+def test_multiple_origin_configuration_normalizes_browser_origins():
+    assert main.allowed_origins(' http://PLAYER.test:80/, https://player.test:443, ,http://player.test:8080 ') == {
+        'http://player.test', 'https://player.test', 'http://player.test:8080'}
+    assert main.allowed_origins('http://[::1]:8080') == {'http://[::1]:8080'}
+
+
+def test_http_and_https_origins_on_same_hostname_keep_separate_cookies(monkeypatch):
+    monkeypatch.setattr(main, 'ORIGINS', main.allowed_origins('http://player.test,https://player.test'))
+    main.attempts.clear()
+    with TestClient(main.app, base_url='https://player.test') as c:
+        for origin in ('https://player.test', 'http://player.test'):
+            response = c.post(origin + '/api/login', json={'password': 'test-password'}, headers={'origin': origin})
+            assert response.status_code == 200
+            cookie = response.headers['set-cookie']
+            assert 'HttpOnly' in cookie and 'SameSite=strict' in cookie
+            assert ('Secure' in cookie) == origin.startswith('https://')
+            assert cookie.startswith(main.session_cookie(origin) + '=')
+            assert c.get(origin + '/api/status').status_code == 200
+            scheme = 'wss' if origin.startswith('https://') else 'ws'
+            with c.websocket_connect(scheme + '://player.test/api/live', headers={'origin': origin}) as ws:
+                ws.send_json({'zones': [1]})
+                assert ws.receive_json()['ready']
+        assert {'session', 'session_https'} <= {cookie.name for cookie in c.cookies.jar}
+        assert c.post('/api/stop', json={}, headers={'origin': 'https://evil.test'}).status_code == 403
+        with pytest.raises(main.WebSocketDisconnect) as error:
+            with c.websocket_connect('wss://player.test/api/live', headers={'origin': 'https://evil.test'}):
+                pass
+        assert error.value.code == 1008
+        assert c.post('/api/logout', headers={'origin': 'https://player.test'}).status_code == 200
+        assert c.get('https://player.test/api/status').status_code == 401
+        assert c.get('http://player.test/api/status').status_code == 401
 
 
 def test_library_persistence_playback_order_and_delete(tmp_path, monkeypatch):

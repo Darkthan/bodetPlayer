@@ -52,7 +52,17 @@ PLAYER_PORT=8080
 PLAYER_ORIGIN=https://192.168.1.50
 ```
 
-Si votre proxy publie HTTPS sur 8443, utiliser `PLAYER_ORIGIN=https://192.168.1.50:8443`. `PLAYER_PORT` reste le port HTTP de l’application en amont du proxy. Le certificat est géré par votre proxy et doit être approuvé sur les PC clients pour la capture audio. `PLAYER_ORIGIN` configure le contrôle d’origine et les cookies de connexion ; utiliser cette adresse pour accéder à l’application. Laisser cette variable vide pour un test HTTP direct sur `http://PLAYER_HOST:PLAYER_PORT`.
+Si votre proxy publie HTTPS sur 8443, utiliser `PLAYER_ORIGIN=https://192.168.1.50:8443`. `PLAYER_PORT` reste le port HTTP de l’application en amont du proxy. Le certificat est géré par votre proxy et doit être approuvé sur les PC clients pour la capture audio. `PLAYER_ORIGIN` configure les adresses autorisées ; laisser cette variable vide pour un test HTTP direct sur `http://PLAYER_HOST:PLAYER_PORT`.
+
+Pour un accès local en HTTP et distant en HTTPS, séparer les origines par des virgules :
+
+```env
+PLAYER_ORIGIN=http://172.17.150.125,https://player.example.fr
+```
+
+Remplacer le domaine par celui de votre reverse proxy. Ajouter le port à chaque adresse s’il n’est pas le port standard, par exemple `http://172.17.150.125:8080`. Les espaces autour des virgules sont acceptés ; les chemins, jokers et adresses autres que HTTP/HTTPS sont refusés. Une ancienne configuration avec une seule origine reste compatible. Chaque origine déclarée peut se connecter, contrôler la lecture et ouvrir la connexion audio WebSocket. Les cookies des sessions HTTPS restent `Secure`, avec un nom distinct des cookies HTTP pour permettre les deux accès sur le même nom de serveur. Aucune confiance n’est accordée aux en-têtes de proxy pour décider de cette protection : le protocole de l’origine autorisée utilisée à la connexion fait foi.
+
+Le HTTP local permet la lecture YouTube et de la bibliothèque côté serveur. La capture du microphone ou du son du PC nécessite toujours HTTPS, une adresse locale de boucle ou une exception de confiance du navigateur.
 
 Après modification de `.env`, relancer Compose. Restreindre l’accès au port HTTP au reverse proxy si nécessaire. Le mot de passe est commun aux opérateurs ; les sessions durent huit heures et sont invalidées au redémarrage. La capture sur une IP LAN nécessite l’accès HTTPS par votre proxy. Le test local `http://127.0.0.1:8080` fonctionne sur le PC hébergeant l’application. La configuration fournie active la diffusion Bodet : vérifier les zones et le multicast avant de démarrer. L’émission multicast depuis Docker Desktop vers le LAN reste à valider ; privilégier Linux en réseau hôte pour la diffusion.
 

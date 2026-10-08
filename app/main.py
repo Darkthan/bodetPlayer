@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -57,7 +58,32 @@ def save_settings(address, zones):
 
 
 PASSWORD = os.getenv("PLAYER_PASSWORD", "")
-ORIGIN = (os.getenv("PLAYER_ORIGIN") or f"http://{os.getenv('PLAYER_HOST', '127.0.0.1')}:{os.getenv('PLAYER_PORT', '8080')}").rstrip("/")
+
+
+def allowed_origins(value):
+    origins = set()
+    for entry in value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            url = urlsplit(entry)
+            if (url.scheme not in ("http", "https") or not url.hostname or url.username or url.password
+                    or url.path not in ("", "/") or url.query or url.fragment or "*" in entry):
+                raise ValueError
+            host = f"[{url.hostname}]" if ":" in url.hostname else url.hostname
+            port = url.port
+            suffix = f":{port}" if port is not None and port != (443 if url.scheme == "https" else 80) else ""
+            origins.add(f"{url.scheme}://{host}{suffix}")
+        except ValueError:
+            raise ValueError("PLAYER_ORIGIN doit contenir des origines HTTP/HTTPS séparées par des virgules, sans chemin.")
+    if not origins:
+        raise ValueError("PLAYER_ORIGIN ne contient aucune origine autorisée.")
+    return frozenset(origins)
+
+
+ORIGINS = allowed_origins(os.getenv("PLAYER_ORIGIN") or
+                          f"http://{os.getenv('PLAYER_HOST', '127.0.0.1')}:{os.getenv('PLAYER_PORT', '8080')}")
 KEY = secrets.token_bytes(32)
 
 
@@ -86,13 +112,24 @@ def valid(token):
 
 
 def authorize(request):
-    if not valid(request.cookies.get("session")):
+    if not any(valid(request.cookies.get(name)) for name in ("session", "session_https")):
         raise HTTPException(401, "Connectez-vous.")
 
 
 def same_origin(request):
-    if request.headers.get("origin") != ORIGIN:
+    if request.headers.get("origin") not in ORIGINS:
         raise HTTPException(403, "Origine refusée.")
+
+
+def session_cookie(origin):
+    # Separate names prevent HTTP logins overwriting a Secure cookie on the
+    # same hostname, and preserve Secure protection for HTTPS sessions.
+    return "session_https" if origin.startswith("https://") else "session"
+
+
+def websocket_session(ws):
+    origin = ws.headers.get("origin", "")
+    return origin in ORIGINS and valid(ws.cookies.get(session_cookie(origin)))
 
 
 class Login(BaseModel):
@@ -158,7 +195,8 @@ async def login(body: Login, request: Request):
     expiry = str(int(time.time()) + 28800)
     token = expiry + "." + hmac.new(KEY, expiry.encode(), hashlib.sha256).hexdigest()
     response = JSONResponse({"ok": True})
-    response.set_cookie("session", token, httponly=True, secure=ORIGIN.startswith("https://"), samesite="strict", max_age=28800)
+    origin = request.headers["origin"]
+    response.set_cookie(session_cookie(origin), token, httponly=True, secure=origin.startswith("https://"), samesite="strict", max_age=28800)
     return response
 
 
@@ -168,6 +206,8 @@ async def logout(request: Request):
     authorize(request)
     response = JSONResponse({"ok": True})
     response.delete_cookie("session")
+    if request.headers["origin"].startswith("https://"):
+        response.delete_cookie("session_https", secure=True, httponly=True, samesite="strict")
     return response
 
 
@@ -353,7 +393,7 @@ async def stop(request: Request):
 @app.websocket("/api/live")
 async def live(ws: WebSocket):
     global active
-    if ws.headers.get("origin") != ORIGIN or not valid(ws.cookies.get("session")):
+    if not websocket_session(ws):
         await ws.close(code=1008)
         return
     await ws.accept()
@@ -392,7 +432,7 @@ async def live(ws: WebSocket):
         await ws.send_json({"ready": True, "mode": CONFIG["mode"]})
         start = time.monotonic()
         while not session["stop"]:
-            if not valid(ws.cookies.get("session")):
+            if not websocket_session(ws):
                 break
             try:
                 data = await asyncio.wait_for(ws.receive_bytes(), 1)
