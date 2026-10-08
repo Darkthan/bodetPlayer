@@ -49,8 +49,10 @@ def main():
         raise ValueError("Qualité Bodet invalide.")
     rate, bitrate = (32000, 64000) if quality == "low" else (48000, 256000)
     settings = audio_settings()
-    block_seconds = settings["block_ms"] / 1000
-    mp3_bytes = min(1000, max(1, bitrate * settings["block_ms"] // 8000))
+    # Capture blocks are PCM transport settings, not MEL packet sizes.
+    # Keep the original encoded-output packetization for receiver compatibility.
+    mp3_bytes = 1000
+    block_seconds = mp3_bytes * 8 / bitrate
     encoder = subprocess.Popen([
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-probesize", "32", "-analyzeduration", "0",
@@ -74,7 +76,8 @@ def main():
             sequence = 0
             deadline = None
             while True:
-                # Read available output in blocks capped by the chosen duration.
+                # Forward available output without waiting to fill 1000 bytes.
+                # Do not split MP3 output according to the PCM capture setting.
                 audio = encoder.stdout.read1(mp3_bytes)
                 if not audio:
                     break

@@ -30,8 +30,9 @@ def test_invalid_zone(zones):
         bodet_bridge.packet(0, zones, b"audio")
 
 
+@pytest.mark.parametrize("block", [10, 20, 40, 100])
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg unavailable")
-def test_real_encoder_with_intercepted_datagrams(monkeypatch):
+def test_real_encoder_with_intercepted_datagrams(monkeypatch, block):
     sent = []
 
     class Sender:
@@ -51,6 +52,8 @@ def test_real_encoder_with_intercepted_datagrams(monkeypatch):
     monkeypatch.setenv("BODET_ZONES", json.dumps([1, 100]))
     monkeypatch.setenv("BODET_QUALITY", "low")
     monkeypatch.setenv("BODET_INTERFACE", "")
+    monkeypatch.setenv("PLAYER_AUDIO_BLOCK_MS", str(block))
+    monkeypatch.setenv("PLAYER_AUDIO_MAX_BACKLOG_MS", "1000")
     monkeypatch.setattr(bodet_bridge.socket, "socket", lambda *args: Sender())
     monkeypatch.setattr(bodet_bridge.signal, "signal", lambda *args: None)
     with tempfile.TemporaryFile() as source:
@@ -66,6 +69,50 @@ def test_real_encoder_with_intercepted_datagrams(monkeypatch):
         assert message[7] == (index // 2) % 256
     mp3 = b"".join(sent[i][0][31:-2] for i in range(0, len(sent), 2))
     assert mp3[:2] in (b"\xff\xfb", b"\xff\xfa")
+
+
+@pytest.mark.parametrize("block", [10, 20, 40, 100])
+def test_capture_buffer_does_not_fragment_bodet_packets(monkeypatch, block):
+    sent = []
+    encoded = bytes(range(256)) * 3
+
+    class Output(io.BytesIO):
+        def read1(self, size):
+            assert size == 1000
+            return super().read1(size)
+
+    class Encoder:
+        stdout = Output(encoded)
+        def wait(self, timeout):
+            return 0
+        def poll(self):
+            return 0
+
+    class Sender:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def setsockopt(self, *args):
+            pass
+        def sendto(self, data, target):
+            sent.append(data)
+
+    monkeypatch.setenv("BODET_MULTICAST_ADDRESS", "239.192.55.1")
+    monkeypatch.setenv("BODET_ZONES", "[1]")
+    monkeypatch.setenv("BODET_QUALITY", "low")
+    monkeypatch.setenv("BODET_INTERFACE", "")
+    monkeypatch.setenv("PLAYER_AUDIO_BLOCK_MS", str(block))
+    monkeypatch.setenv("PLAYER_AUDIO_MAX_BACKLOG_MS", "1000")
+    monkeypatch.setattr(bodet_bridge.subprocess, "Popen", lambda *args, **kwargs: Encoder())
+    monkeypatch.setattr(bodet_bridge.socket, "socket", lambda *args: Sender())
+    monkeypatch.setattr(bodet_bridge.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(bodet_bridge.time, "sleep", lambda duration: None)
+    assert len(encoded) < 1000
+    bodet_bridge.main()
+    assert len(sent) == 2
+    assert sent[0] == sent[1]
+    assert sent[0][31:-2] == encoded
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg unavailable")
