@@ -112,7 +112,7 @@ async function refresh() {
     if (!currentStatus || error.message === 'Connectez-vous.') {
       currentStatus = null; localAgentId = ''; localAgentChecked = 0;
       $('login').hidden = false; $('dashboard').hidden = true; $('settingsButton').hidden = true;
-      $('settingsDialog').close(); $('diffusionDialog').close();
+      $('settingsDialog').close();
     } else message(error.message);
   }
 }
@@ -123,14 +123,25 @@ function renderAgent(status) {
   $('agentName').textContent = agent?.name || 'Son de votre PC';
   $('agentState').textContent = !agent ? 'Agent non détecté' : !agent.online ? 'Connexion au serveur en attente' : ownCapture ? 'Diffusion en cours' : 'Prêt à diffuser';
   $('agentState').classList.toggle('is-live', !!ownCapture);
-  $('manageDiffusion').disabled = !agent?.online;
+  $('broadcastPanel').hidden = !agent;
+  $('livePanel').hidden = !ownCapture;
+  $('start').hidden = !!status.active;
+  $('stop').hidden = !ownCapture;
+  $('activity').hidden = !!ownCapture;
+  $('liveZones').replaceChildren();
+  if (ownCapture) for (const id of status.active.zones) {
+    const chip = document.createElement('span');
+    chip.textContent = currentZones.find(zone => zone.id === id)?.name || `Zone ${id}`;
+    $('liveZones').append(chip);
+  }
   $('start').disabled = !!status.active || busy || !agent?.online;
   $('stop').disabled = !ownCapture || busy;
   $('zonesSection').hidden = !!status.active;
   $('activity').textContent = ownCapture
     ? 'Diffusion vers les zones ' + status.active.zones.join(', ') + '.'
     : status.active ? 'Une autre diffusion est en cours.' : 'Aucune diffusion en cours.';
-  $('diffusionState').textContent = agent?.error || $('activity').textContent;
+  $('diffusionState').textContent = agent?.error || (ownCapture ? '' : $('activity').textContent);
+  $('diffusionState').hidden = !$('diffusionState').textContent;
 }
 function clearZoneWarning() {
   if ($('zones').querySelector('input:checked')) {
@@ -138,8 +149,6 @@ function clearZoneWarning() {
   }
 }
 $('zones').onchange = clearZoneWarning;
-$('manageDiffusion').onclick = () => { $('diffusionDialog').showModal(); refresh(); };
-$('closeDiffusion').onclick = () => $('diffusionDialog').close();
 document.querySelector('.download-agent').href = '/api/agents/download?server=' + encodeURIComponent(location.origin);
 $('checkLocalAgent').onclick = async () => {
   $('checkLocalAgent').disabled = true;

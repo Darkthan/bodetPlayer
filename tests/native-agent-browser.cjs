@@ -18,7 +18,6 @@ const assert = require('node:assert/strict');
     await page.locator('#loginForm button').click();
     await page.locator('#agentName').filter({hasText:'Agent de test'}).waitFor({timeout:15000});
     assert.equal(await page.locator('#agentSettings').isHidden(), true);
-    await page.locator('#manageDiffusion').click();
     await page.locator('#start').click();
     assert.equal(await page.locator('#zoneWarning').isVisible(), true);
     await page.locator('#zones input').check();
