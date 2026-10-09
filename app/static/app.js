@@ -126,6 +126,7 @@ function renderAgent(status) {
   $('manageDiffusion').disabled = !agent?.online;
   $('start').disabled = !!status.active || busy || !agent?.online;
   $('stop').disabled = !ownCapture || busy;
+  $('zonesSection').hidden = !!status.active;
   $('activity').textContent = ownCapture
     ? 'Diffusion vers les zones ' + status.active.zones.join(', ') + '.'
     : status.active ? 'Une autre diffusion est en cours.' : 'Aucune diffusion en cours.';
