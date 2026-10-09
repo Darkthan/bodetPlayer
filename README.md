@@ -1,6 +1,6 @@
 # Bodet Player
 
-Application web en français pour sélectionner des zones et envoyer l’audio d’un PC, d’un microphone ou d’un fichier au serveur Linux. Docker Compose démarre un seul service web, sans proxy, en HTTP, derrière votre reverse proxy HTTPS.
+Application web en français pour sélectionner des zones et diffuser l’audio du PC via son agent Windows vers le serveur Linux. Docker Compose démarre un seul service web, sans proxy, en HTTP, derrière votre reverse proxy HTTPS.
 
 ## État de la connexion Bodet
 
@@ -70,40 +70,24 @@ Après modification de `.env`, relancer Compose. Restreindre l’accès au port 
 
 Cliquer sur le bouton bleu **Paramètres** en bas à droite. Dans **Configuration réseau**, saisir manuellement l’adresse multicast IPv4 de l’installation et cliquer sur **Enregistrer l’adresse**. La valeur initiale d’exemple est `239.192.55.1` : vérifier qu’elle correspond à Sigma. Seules les adresses de `224.0.0.0` à `239.255.255.255` sont acceptées. Arrêter toute diffusion avant de changer l’adresse. Le paramètre est conservé après redémarrage dans le volume Docker `player_data` ; `docker compose down -v` efface ce volume. Le mode simulation n’envoie toujours aucun paquet vers les enceintes.
 
-Ouvrir l’interface sur le PC source, se connecter, sélectionner les zones puis une source et démarrer. Le partage du son système dépend du navigateur et du système : choisir une surface proposant l’audio et activer le partage audio. Un onglet audio peut être utilisé si la capture système n’est pas proposée. Le navigateur impose une autorisation à chaque partage ; un autre PC ne peut pas capturer le son à distance sans participation du PC source.
+Ouvrir l’interface sur le PC source et se connecter. Elle propose uniquement la diffusion avec l’agent Windows local. Si aucun agent n’est détecté, le panneau **Installer l’agent** propose son téléchargement et une vérification locale. Dès que l’agent est détecté, ce panneau se masque et l’écran affiche son état et le bouton **Gérer la diffusion**.
 
-Les sources sont **Micro**, **Playlist**, **Onglet externe** et **Son du PC (agent Windows)**. Pour le micro et l’onglet, garder la page ouverte : sa fermeture coupe la session. Pour partager le son d’un onglet, utiliser Chrome ou Edge et cocher le partage audio ; Firefox ne fournit pas ce son. Les fichiers importés et l’agent Windows fonctionnent dans Firefox. Un opérateur connecté peut arrêter la diffusion depuis son interface. Une seule source peut diffuser à la fois.
+Cliquer sur **Gérer la diffusion**, sélectionner les zones puis **Démarrer la diffusion**. Sans zone sélectionnée, un avertissement rouge visible et annoncé par les lecteurs d’écran demande de choisir au moins une zone ; aucune commande de démarrage n’est envoyée. **Arrêter la diffusion** coupe la capture de ce PC. La fermeture de la page n’arrête pas une diffusion déjà lancée. Le navigateur ne contrôle pas les agents des autres PC. Une seule diffusion peut être active à la fois.
 
 Dans le même panneau, **Gérer les zones** permet d’ajouter, modifier ou supprimer une zone. Chaque zone possède un numéro unique entre 1 et 100 et un nom. Les zones sont conservées avec l’adresse multicast dans le volume Docker. Les réglages sont bloqués pendant une diffusion. Les changements mettent à jour la liste des zones sans recharger la page ; ils ne reconfigurent pas la centrale Sigma.
 
-## Import de fichiers, playlists et bibliothèque
-
-Choisir **Playlist**, déposer les fichiers audio dans la bibliothèque ou cliquer sur **Importer des sons**. Les imports acceptent plusieurs fichiers et sont ajoutés à la file. Choisir les zones puis **Démarrer la diffusion**. Le lecteur propose **Précédent**, **Suivant**, **Arrêter** et trois modes de boucle : désactivée, piste actuelle ou playlist entière. Une piste illisible est signalée et la lecture passe à la suivante ; une file entièrement illisible s’arrête.
-
-La **file de lecture** se réordonne par glisser-déposer ou avec les flèches, sans interrompre la piste en cours. Après le réordonnancement, le passage automatique suit le nouvel ordre. Les doublons d’une playlist sont conservés.
-
-**Mes playlists** permet d’enregistrer une file sous un nom, puis de la recharger avec le sélecteur. Pour modifier une playlist, charger celle-ci, ajouter ou retirer des sons, réordonner la file puis enregistrer les modifications. **Nouvelle playlist** prépare une file vide. Les playlists sont conservées dans `/data/playlists.json`, avec une limite de 100 playlists de 100 pistes chacune. Un même son peut appartenir à plusieurs playlists sans dupliquer le fichier. Supprimer une playlist conserve tous les sons de la bibliothèque.
-
-Dans la bibliothèque, cocher plusieurs sons ou utiliser **Tout sélectionner**, puis **Ajouter la sélection à la file** ou **Supprimer la sélection**. La suppression multiple demande confirmation, efface les fichiers et retire leurs références de toutes les playlists. La suppression individuelle fait de même. Arrêter la diffusion avant de modifier les playlists ou de supprimer des sons.
-
-Les sons restent dans la **bibliothèque** du volume `player_data` (`/data/youtube/library`). Pour les relire, ajouter les pistes à une file, choisir la source **Playlist**, régler leur ordre et démarrer. Les fichiers importés sont conservés après arrêt et redémarrage ; la file active et la lecture ne sont pas restaurées après un redémarrage du serveur. La suppression d’une piste de la bibliothèque nécessite l’arrêt de la diffusion. `docker compose down -v` efface aussi ces fichiers.
-
-Les fichiers de la bibliothèque sont diffusés directement par le serveur : Firefox et HTTP fonctionnent sans partage d’écran, sans microphone et sans exception de contexte sécurisé. Fermer la page ou se déconnecter n’arrête pas cette lecture ; utiliser **Arrêter** pour la couper. Une seule source (playlist, agent Windows ou capture navigateur) peut diffuser à la fois.
-
-Dans **Playlist**, déposer les sons ou cliquer sur **Importer des sons**. Les imports acceptent plusieurs fichiers, 100 Mio par fichier, avec conversion MP3 et conservation de la première heure de chaque son. Les sons sont conservés sur le serveur et ajoutés automatiquement à la file. Arrêter la diffusion avant un import. La bibliothèque est limitée à 1 Gio. Le dépôt ne déclenche aucune lecture dans le navigateur.
-
-Limites : 100 pistes par file, une heure et 100 Mio par fichier, bibliothèque de 1 Gio. La conversion d’un fichier est limitée à cinq minutes. La lecture utilise uniquement les fichiers présents sur le serveur : aucun lien vidéo ni téléchargement distant n’est proposé. Les fichiers et playlists déjà enregistrés sont conservés lors de la mise à jour, y compris dans le dossier historique `/data/youtube/library`.
-
-L’image inclut FFmpeg pour convertir et lire les fichiers audio. Mise à jour :
+## Mise à jour
 
 ```sh
 git pull
 docker compose up -d --build --force-recreate
 ```
 
+Recharger la page avec Ctrl+F5. L’interface ne propose plus les sources micro, onglet, fichiers ni playlists. Les données audio et playlists déjà stockées dans le volume Docker sont conservées ; les routes historiques côté serveur restent disponibles.
+
 ## Délai de diffusion
 
-Le navigateur demande une faible latence audio. La passerelle limite l’analyse initiale de FFmpeg et transmet les blocs MP3 disponibles sans attendre de remplir 1000 octets (125 ms à 64 kbit/s). Le rythme de diffusion et le format MEL restent conservés. Le délai réel dépend aussi du navigateur, du réseau et des buffers des enceintes ; il doit être mesuré sur l’installation. Pour appliquer une mise à jour sur le serveur : `docker compose up -d --build --force-recreate`.
+La passerelle limite l’analyse initiale de FFmpeg et transmet les blocs MP3 disponibles sans attendre de remplir 1000 octets (125 ms à 64 kbit/s). Le rythme de diffusion et le format MEL restent conservés. Le délai réel dépend aussi du navigateur, du réseau et des buffers des enceintes ; il doit être mesuré sur l’installation. Pour appliquer une mise à jour sur le serveur : `docker compose up -d --build --force-recreate`.
 
 Le panneau **Paramètres → Buffer audio** permet de régler la taille des blocs et l’attente maximale en millisecondes. Trois profils sont proposés : **Faible délai** (10 / 100 ms), **Équilibré** (20 / 200 ms) et **Réseau instable** (40 / 500 ms). Arrêter la diffusion, choisir les valeurs puis cliquer sur **Enregistrer le buffer**. Les réglages sont conservés dans le volume Docker, restent présents après une modification des zones ou du multicast, et s’appliquent à la prochaine diffusion sans redémarrage. Ils règlent la capture navigateur et le décodage des playlists. Le découpage des paquets multicast Bodet reste indépendant de ces valeurs pour préserver la compatibilité des récepteurs.
 
@@ -129,12 +113,12 @@ Les fichiers Compose fournis transmettent ces variables au conteneur. Si vous ut
 
 ### Son du PC dans Firefox
 
-Firefox ne fournit pas de piste audio avec le partage d’écran ou d’onglet. Pour des fichiers audio, utiliser **Playlist** et importer les sons. Pour tous les sons du PC, utiliser **Son du PC (agent Windows)**. Aucun câble audio virtuel ni Mixage stéréo n’est nécessaire. Chrome/Edge permettent aussi le partage direct d’un onglet avec son audio.
+Firefox utilise l’agent Windows pour diffuser le son du PC. Autoriser l’accès aux applications et services de cet appareil si Firefox le demande. La détection laisse 30 secondes pour répondre à cette demande. Si le PC ne remonte pas, vérifier l’icône de l’agent près de l’horloge et utiliser **Vérifier l’agent** dans le panneau d’installation. Ce panneau se masque automatiquement après détection.
 
 ### Agent Windows et contrôle depuis le navigateur
 
 1. Après `git pull`, reconstruire l’image avec `docker compose up -d --build --force-recreate`, puis recharger la page avec Ctrl+F5.
-2. Choisir **Son du PC (agent Windows)**, puis **Télécharger l’agent pour ce PC**. La construction Docker compile automatiquement `BodetAgent.exe` pour Windows 10/11 x64, avec .NET inclus ; aucune installation de Python ou de .NET n’est nécessaire sur le PC source. La première construction télécharge le SDK et les dépendances de l’agent.
+2. Dans le panneau **Installer l’agent**, cliquer sur **Télécharger l’agent pour ce PC**. La construction Docker compile automatiquement `BodetAgent.exe` pour Windows 10/11 x64, avec .NET inclus ; aucune installation de Python ou de .NET n’est nécessaire sur le PC source. La première construction télécharge le SDK et les dépendances de l’agent.
 3. Le téléchargement contient l’adresse du serveur et un ticket d’association à usage unique valable 24 heures. Lancer l’exécutable sur le PC source : l’association est automatique, avec le nom Windows du PC. Le ticket est consommé par le premier PC qui l’utilise ; le même téléchargement ne peut pas associer un second PC. Les tickets sont conservés sous forme d’empreintes dans `/data/agent-installations.json` et survivent au redémarrage du serveur. L’exécutable n’est pas signé par un certificat de publication ; une politique Windows exigeant des exécutables signés peut empêcher son lancement.
 4. L’agent de ce PC apparaît connecté dans la page. Choisir les zones, puis **Démarrer la diffusion**. **Arrêter toute diffusion** arrête aussi la capture native de ce PC. Le navigateur ne peut pas démarrer, arrêter ni retirer l’agent d’un autre PC. Autoriser l’accès au réseau local si le navigateur le demande pour détecter l’agent. L’agent ne capture aucun son avant cette commande web.
 5. Après association, la fenêtre se masque et l’agent reste dans la zone de notification. Fermer sa fenêtre avec la croix le laisse actif. Il démarre automatiquement à l’ouverture de votre session Windows et retente la connexion après une interruption réseau ou un redémarrage du serveur, sans nouveau code d’association. La page web peut être fermée pendant la diffusion. La capture se démarre depuis la page web ; après une interruption de connexion, l’agent revient disponible et attend une nouvelle commande de diffusion.

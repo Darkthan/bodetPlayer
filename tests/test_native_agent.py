@@ -19,6 +19,10 @@ def test_native_agent_web_control_and_pcm_stream(tmp_path):
         allocator.bind(('127.0.0.1', 0))
         port = allocator.getsockname()[1]
     origin = f'http://127.0.0.1:{port}'
+    with socket.socket() as allocator:
+        allocator.bind(('127.0.0.1', 0))
+        identity_port = allocator.getsockname()[1]
+    identity_url = f'http://127.0.0.1:{identity_port}/identity'
     config = tmp_path / 'config.json'
     config.write_text(json.dumps({'mode':'simulation', 'zones':[{'id':1,'name':'Test'}]}))
     env = dict(os.environ, PLAYER_PASSWORD=secrets.token_urlsafe(16), PLAYER_ORIGIN=origin,
@@ -48,21 +52,21 @@ def test_native_agent_web_control_and_pcm_stream(tmp_path):
         assert download.ok and download.content[-16:] == b'BODET_CONFIG_V1!'
         personalized = tmp_path / 'BodetAgent.exe'
         personalized.write_bytes(download.content)
-        agent = subprocess.Popen([str(personalized), '--bootstrap-integration-test'], creationflags=subprocess.CREATE_NO_WINDOW)
+        agent = subprocess.Popen([str(personalized), '--bootstrap-integration-test', f'--identity-port={identity_port}'], creationflags=subprocess.CREATE_NO_WINDOW)
         status = lambda: client.get(origin + '/api/status', timeout=2).json()
         wait_for(lambda: any(a['online'] for a in status()['agents']))
         agent_id = status()['agents'][0]['id']
         def bind_local():
             challenge = client.post(origin + '/api/agents/local/challenge', json={}, headers=headers).json()['challenge']
-            assert requests.get('http://127.0.0.1:17861/identity', params={'challenge':challenge}, headers={'origin':'https://other.example'}, timeout=2).status_code == 403
-            identity = requests.get('http://127.0.0.1:17861/identity', params={'challenge':challenge}, headers=headers, timeout=2)
+            assert requests.get(identity_url, params={'challenge':challenge}, headers={'origin':'https://other.example'}, timeout=2).status_code == 403
+            identity = requests.get(identity_url, params={'challenge':challenge}, headers=headers, timeout=2)
             assert identity.headers['access-control-allow-origin'] == origin
             response = client.post(origin + '/api/agents/local', json=identity.json(), headers=headers)
             assert response.ok and response.json()['id'] == agent_id
         bind_local()
         if os.getenv('PLAYER_NATIVE_BROWSER_TEST') == '1':
             browser = subprocess.run(['node', str(Path(__file__).with_name('native-agent-browser.cjs'))],
-                                     env=dict(os.environ, BODET_TEST_ORIGIN=origin, BODET_TEST_PASSWORD=env['PLAYER_PASSWORD']),
+                                     env=dict(os.environ, BODET_TEST_ORIGIN=origin, BODET_TEST_PASSWORD=env['PLAYER_PASSWORD'], BODET_TEST_IDENTITY_PORT=str(identity_port)),
                                      capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
             assert browser.returncode == 0, browser.stdout + browser.stderr
         # A reused personalized download cannot enroll a second PC.

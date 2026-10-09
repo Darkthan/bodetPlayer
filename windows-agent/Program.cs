@@ -20,7 +20,10 @@ internal static class Program
                     ?? throw new IOException("Configuration intégrée absente.") : new AgentBootstrap(args[1], args[2]);
                 var settings = AgentClient.Pair(bootstrap.Server, bootstrap.Code, "Agent de test").GetAwaiter().GetResult();
                 using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-                var localIdentity = new LocalAgentIdentity(settings);
+                // Integration tests use an isolated listener without disturbing the installed agent.
+                var portArgument = args.FirstOrDefault(value => value.StartsWith("--identity-port="));
+                int identityPort = portArgument is null ? 17861 : int.Parse(portArgument.Split('=')[1]);
+                var localIdentity = new LocalAgentIdentity(settings, identityPort);
                 localIdentity.Start().GetAwaiter().GetResult();
                 new AgentClient(settings, _ => { }, synthetic:true).Run(cancellation.Token).GetAwaiter().GetResult();
                 localIdentity.DisposeAsync().AsTask().GetAwaiter().GetResult();

@@ -11,11 +11,12 @@ internal sealed class LocalAgentIdentity : IAsyncDisposable
 {
     private readonly WebApplication application;
 
-    internal LocalAgentIdentity(AgentSettings settings)
+    internal LocalAgentIdentity(AgentSettings settings, int port = 17861)
     {
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls("http://127.0.0.1:17861");
+        if (port is < 1024 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
+        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
         application = builder.Build();
         string origin = AgentClient.ServerUri(settings.Server).GetLeftPart(UriPartial.Authority);
         application.MapMethods("/identity", ["GET", "OPTIONS"], async context => {
