@@ -11,16 +11,30 @@ internal static class Program
     {
         if (args.Contains("--self-test"))
         {
-            try { AudioPipeline.SelfTest(); return 0; } catch (Exception) { return 1; }
+            try { AudioPipeline.SelfTest(); AgentInstallation.SelfTest(); return 0; } catch (Exception) { return 1; }
         }
-        if (args.Length == 3 && args[0] == "--integration-test")
+        if ((args.Length == 3 && args[0] == "--integration-test") || args.Contains("--bootstrap-integration-test"))
         {
             try {
-                var settings = AgentClient.Pair(args[1], args[2], "Agent de test").GetAwaiter().GetResult();
+                var bootstrap = args.Contains("--bootstrap-integration-test") ? AgentBootstrap.Load()
+                    ?? throw new IOException("Configuration intégrée absente.") : new AgentBootstrap(args[1], args[2]);
+                var settings = AgentClient.Pair(bootstrap.Server, bootstrap.Code, "Agent de test").GetAwaiter().GetResult();
                 using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+                var localIdentity = new LocalAgentIdentity(settings);
+                localIdentity.Start().GetAwaiter().GetResult();
                 new AgentClient(settings, _ => { }, synthetic:true).Run(cancellation.Token).GetAwaiter().GetResult();
+                localIdentity.DisposeAsync().AsTask().GetAwaiter().GetResult();
                 return 0;
             } catch (Exception) { return 1; }
+        }
+        // One process per Windows user, including launches from Downloads and startup.
+        using var instance = new Mutex(true, @"Local\BodetPlayerAgent-" +
+            System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value, out bool firstInstance);
+        if (!firstInstance)
+        {
+            if (!args.Contains("--background"))
+                MessageBox.Show("L’agent est déjà actif. Ouvrez-le depuis son icône dans la zone de notification. Pour installer une mise à jour, quittez d’abord l’agent depuis cette icône.", "Bodet Player");
+            return 0;
         }
         ApplicationConfiguration.Initialize();
         Application.Run(new AgentWindow());
@@ -41,8 +55,10 @@ internal sealed class AgentWindow : Form
     private AgentSettings? settings;
     private CancellationTokenSource? connectionCancellation;
     private Task? connectionTask;
+    private LocalAgentIdentity? localIdentity;
     private bool exiting;
-    private static string SettingsPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BodetPlayer", "agent.dat");
+    private bool exitRequested;
+    private static string SettingsPath => Path.Combine(AgentInstallation.DataDirectory, "agent.dat");
 
     public AgentWindow()
     {
@@ -57,12 +73,12 @@ internal sealed class AgentWindow : Form
             layout.Controls.Add(field);
         }
         layout.Controls.Add(connect); layout.Controls.Add(disconnect); layout.Controls.Add(forget); layout.Controls.Add(state);
-        layout.Controls.Add(new Label {Text = "La capture commence uniquement sur commande de l’interface web.\nLe son de toutes les applications sur la sortie Windows par défaut est envoyé.\nRéduisez cette fenêtre pour laisser l’agent actif dans la zone de notification.", Width = 490, Height = 65});
+        layout.Controls.Add(new Label {Text = "Après association, l’agent démarre avec votre session Windows et se reconnecte automatiquement. Fermer cette fenêtre le laisse actif en arrière-plan. La capture commence sur commande de l’interface web.", Width = 490, Height = 65});
         Controls.Add(layout);
         tray.DoubleClick += (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); };
         var menu = new ContextMenuStrip();
         menu.Items.Add("Ouvrir", null, (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); });
-        menu.Items.Add("Quitter et arrêter la capture", null, (_, _) => Close()); tray.ContextMenuStrip = menu;
+        menu.Items.Add("Quitter et arrêter la capture", null, (_, _) => { exitRequested = true; Close(); }); tray.ContextMenuStrip = menu;
         Resize += (_, _) => { if (WindowState == FormWindowState.Minimized) Hide(); };
         connect.Click += async (_, _) => {
             connect.Enabled = false;
@@ -71,33 +87,62 @@ internal sealed class AgentWindow : Form
                     settings = await AgentClient.Pair(server.Text, code.Text, name.Text.Trim());
                     Save(settings); code.Clear();
                 }
-                Start();
+                AgentInstallation.EnableStartup();
+                await Start(); Hide();
             } catch (Exception error) { state.Text = error.Message; connect.Enabled = true; }
         };
         disconnect.Click += async (_, _) => { await Stop(); state.Text = "Déconnecté. Aucune capture audio."; };
         forget.Click += async (_, _) => {
-            await Stop(); settings = null;
+            await Stop();
+            try { AgentInstallation.DisableStartup(); }
+            catch (Exception error) { state.Text = "Impossible de désactiver le démarrage automatique : " + error.Message; return; }
+            settings = null;
             if (File.Exists(SettingsPath)) File.Delete(SettingsPath);
             server.Enabled = name.Enabled = code.Enabled = true;
             connect.Text = "Associer et connecter"; state.Text = "Association oubliée sur ce PC. Révoquez aussi l’agent dans l’interface web.";
         };
         FormClosing += async (_, eventArgs) => {
             if (exiting) return;
+            if (eventArgs.CloseReason != CloseReason.UserClosing)
+            {
+                connectionCancellation?.Cancel(); tray.Dispose(); return;
+            }
+            if (!exitRequested && settings is not null && eventArgs.CloseReason == CloseReason.UserClosing)
+            {
+                eventArgs.Cancel = true; Hide(); return;
+            }
             eventArgs.Cancel = true; await Stop(); exiting = true; tray.Dispose(); Close();
         };
-        Shown += (_, _) => {
+        Shown += async (_, _) => {
             try {
                 if (File.Exists(SettingsPath)) {
                     settings = JsonSerializer.Deserialize<AgentSettings>(Encoding.UTF8.GetString(ProtectedData.Unprotect(File.ReadAllBytes(SettingsPath), null, DataProtectionScope.CurrentUser)));
-                    if (settings is not null) { server.Text = settings.Server; name.Text = settings.Name; Start(); }
+                    if (settings is not null) {
+                        server.Text = settings.Server; name.Text = settings.Name;
+                        try { AgentInstallation.EnableStartup(); await Start(); Hide(); }
+                        catch (Exception error) { state.Text = "Démarrage automatique indisponible : " + error.Message; }
+                    }
+                } else if (AgentBootstrap.Load() is { } bootstrap) {
+                    server.Text = bootstrap.Server; code.Text = bootstrap.Code;
+                    connect.Enabled = false; state.Text = "Association automatique de ce PC…";
+                    try {
+                        settings = await AgentClient.Pair(bootstrap.Server, bootstrap.Code, Environment.MachineName);
+                        Save(settings); code.Clear(); AgentInstallation.EnableStartup(); await Start(); Hide();
+                    } catch (Exception error) {
+                        connect.Enabled = true;
+                        state.Text = "Association automatique impossible : " + error.Message + " Téléchargez un nouvel agent si ce fichier a déjà été utilisé sur un autre PC.";
+                    }
                 }
             } catch (Exception) { settings = null; state.Text = "Association illisible. Générez un nouveau code dans Bodet Player."; }
         };
     }
 
-    private void Start()
+    private async Task Start()
     {
         if (settings is null || connectionTask is not null) return;
+        localIdentity = new LocalAgentIdentity(settings);
+        try { await localIdentity.Start(); }
+        catch { await localIdentity.DisposeAsync(); localIdentity = null; throw; }
         server.Enabled = name.Enabled = code.Enabled = connect.Enabled = false; disconnect.Enabled = true;
         connectionCancellation = new CancellationTokenSource();
         var client = new AgentClient(settings, text => {
@@ -111,6 +156,7 @@ internal sealed class AgentWindow : Form
         disconnect.Enabled = false; connectionCancellation?.Cancel();
         if (connectionTask is not null) { try { await connectionTask; } catch (Exception) { } }
         connectionTask = null; connectionCancellation?.Dispose(); connectionCancellation = null;
+        if (localIdentity is not null) { await localIdentity.DisposeAsync(); localIdentity = null; }
         connect.Enabled = true; connect.Text = settings is null ? "Associer et connecter" : "Reconnecter";
     }
 

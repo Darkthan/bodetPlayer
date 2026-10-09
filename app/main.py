@@ -10,13 +10,14 @@ import shutil
 import sys
 import time
 import tempfile
+import struct
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StrictInt
 from app.playback import Library, AudioPlayer, MAX_FILE_BYTES, MAX_LIBRARY_BYTES, spawn, terminate
@@ -114,8 +115,9 @@ AGENTS = AgentRegistry(lambda: SETTINGS_PATH)
 
 def valid(token):
     try:
-        expiry, signature = token.split(".")
-        expected = hmac.new(KEY, expiry.encode(), hashlib.sha256).hexdigest()
+        payload, signature = token.split(".")
+        expiry = payload.split(":", 1)[0]
+        expected = hmac.new(KEY, payload.encode(), hashlib.sha256).hexdigest()
         return int(expiry) > time.time() and hmac.compare_digest(signature, expected)
     except (ValueError, AttributeError):
         return False
@@ -158,6 +160,25 @@ class AudioSettings(BaseModel):
 class AgentPair(BaseModel):
     code: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=80)
+
+
+class AgentLocalProof(BaseModel):
+    challenge: str = Field(min_length=64, max_length=64)
+    proof: str = Field(min_length=64, max_length=64)
+
+
+agent_challenges = {}
+local_agents = {}
+
+
+def browser_session(request):
+    return request.cookies.get(session_cookie(request.headers.get("origin", str(request.base_url).rstrip("/"))), "")
+
+
+def require_local_agent(request, agent_id):
+    binding = local_agents.get(browser_session(request))
+    if not binding or binding[0] != agent_id or binding[1] <= time.monotonic():
+        raise HTTPException(403, "Vous pouvez uniquement contrôler l’agent présent sur ce PC. Vérifiez sa connexion locale.")
 
 
 class AgentStart(BaseModel):
@@ -240,7 +261,8 @@ async def login(body: Login, request: Request):
     if not PASSWORD or not secrets.compare_digest(body.password, PASSWORD):
         raise HTTPException(401, "Mot de passe incorrect.")
     expiry = str(int(time.time()) + 28800)
-    token = expiry + "." + hmac.new(KEY, expiry.encode(), hashlib.sha256).hexdigest()
+    payload = expiry + ":" + secrets.token_hex(16)
+    token = payload + "." + hmac.new(KEY, payload.encode(), hashlib.sha256).hexdigest()
     response = JSONResponse({"ok": True})
     origin = request.headers["origin"]
     response.set_cookie(session_cookie(origin), token, httponly=True, secure=origin.startswith("https://"), samesite="strict", max_age=28800)
@@ -251,6 +273,7 @@ async def login(body: Login, request: Request):
 async def logout(request: Request):
     same_origin(request)
     authorize(request)
+    local_agents.pop(browser_session(request), None)
     response = JSONResponse({"ok": True})
     response.delete_cookie("session")
     if request.headers["origin"].startswith("https://"):
@@ -549,7 +572,57 @@ async def download_agent(request: Request):
     path = Path(os.getenv("PLAYER_AGENT_DOWNLOAD", str(Path(__file__).parent / "downloads" / "BodetAgent.exe")))
     if not path.is_file():
         raise HTTPException(503, "Reconstruisez l’image Docker pour inclure l’agent Windows.")
-    return FileResponse(path, filename="BodetAgent.exe", media_type="application/octet-stream")
+    server = request.query_params.get("server", str(request.base_url).rstrip("/"))
+    if server not in ORIGINS:
+        raise HTTPException(403, "Adresse du serveur refusée.")
+    async with lock:
+        code = AGENTS.installation_code()
+    configuration = json.dumps({"Server": server, "Code": code}).encode()
+    trailer = configuration + struct.pack("<I", len(configuration)) + b"BODET_CONFIG_V1!"
+    def content():
+        with path.open("rb") as executable:
+            while block := executable.read(1024 * 1024):
+                yield block
+        yield trailer
+    return StreamingResponse(content(), media_type="application/octet-stream", headers={
+        "Content-Disposition": 'attachment; filename="BodetAgent.exe"', "Cache-Control": "no-store",
+        "Content-Length": str(path.stat().st_size + len(trailer))})
+
+
+@app.post("/api/agents/local/challenge")
+async def local_agent_challenge(request: Request):
+    same_origin(request); authorize(request)
+    now = time.monotonic()
+    for key, value in list(local_agents.items()):
+        if value[1] <= now:
+            local_agents.pop(key, None)
+    for key, value in list(agent_challenges.items()):
+        if value[1] <= now:
+            agent_challenges.pop(key, None)
+    session = browser_session(request)
+    # Only one pending challenge per browser session.
+    for key, value in list(agent_challenges.items()):
+        if value[0] == session:
+            agent_challenges.pop(key, None)
+    challenge = secrets.token_hex(32)
+    agent_challenges[challenge] = (session, now + 30)
+    return {"challenge": challenge}
+
+
+@app.post("/api/agents/local")
+async def bind_local_agent(body: AgentLocalProof, request: Request):
+    same_origin(request); authorize(request)
+    pending = agent_challenges.pop(body.challenge, None)
+    session = browser_session(request)
+    if not pending or pending[0] != session or pending[1] <= time.monotonic():
+        raise HTTPException(403, "Vérification locale expirée.")
+    for record in AGENTS.records():
+        expected = hmac.new(bytes.fromhex(record["token_hash"]), body.challenge.encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(expected, body.proof):
+            local_agents[session] = (record["id"], time.monotonic() + 30)
+            return {"id": record["id"]}
+    local_agents.pop(session, None)
+    raise HTTPException(403, "Agent local non reconnu ou révoqué.")
 
 
 @app.post("/api/agents/pairing")
@@ -571,6 +644,7 @@ async def pair_agent(body: AgentPair):
 async def revoke_agent(agent_id: str, request: Request):
     same_origin(request)
     authorize(request)
+    require_local_agent(request, agent_id)
     async with lock:
         records = AGENTS.records()
         remaining = [record for record in records if record["id"] != agent_id]
@@ -590,6 +664,7 @@ async def start_agent(agent_id: str, body: AgentStart, request: Request):
     global active
     same_origin(request)
     authorize(request)
+    require_local_agent(request, agent_id)
     async with lock:
         if active:
             raise HTTPException(409, "Une diffusion est déjà en cours.")
@@ -646,6 +721,8 @@ async def agent_control(ws: WebSocket):
                 connection["status"] = "capturing" if report.get("status") == "capturing" else "idle"
                 connection["error"] = str(report.get("error", ""))[:300]
                 connection["device"] = str(report.get("device", ""))[:200]
+                if report.get("heartbeat") is True:
+                    await asyncio.wait_for(ws.send_json({"command": "heartbeat"}), 3)
                 if (report.get("status") in ("stopped", "error") and active and active.get("agent_id") == agent_id
                         and report.get("session") == active["agent_session"]):
                     active["stop"] = True
@@ -674,6 +751,8 @@ async def stop(request: Request):
     same_origin(request)
     authorize(request)
     if active:
+        if active.get("kind") == "agent":
+            require_local_agent(request, active["agent_id"])
         active["stop"] = True
         if active.get("kind") == "playlist" and music_player:
             await music_player.stop()

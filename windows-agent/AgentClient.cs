@@ -70,7 +70,7 @@ internal sealed class AgentClient(AgentSettings settings, Action<string> status,
     {
         if (control?.State != WebSocketState.Open) return;
         byte[] json = JsonSerializer.SerializeToUtf8Bytes(new {status = reportStatus ?? (capturing ? "capturing" : "idle"),
-            error = captureError, device = deviceName, session = captureSession});
+            error = captureError, device = deviceName, session = captureSession, heartbeat = true});
         await controlSend.WaitAsync(token);
         try { await control.SendAsync(json, WebSocketMessageType.Text, true, token); }
         finally { controlSend.Release(); }
@@ -91,14 +91,23 @@ internal sealed class AgentClient(AgentSettings settings, Action<string> status,
                 await control.ConnectAsync(SocketUri("api/agents/control"), connectTimeout.Token);
                 status("Connecté — en attente d’une commande depuis Bodet Player.");
                 heartbeat = Task.Run(async () => {
-                    while (!connected.IsCancellationRequested) {
-                        await Report(connected.Token);
-                        await Task.Delay(3000, connected.Token);
+                    try {
+                        while (!connected.IsCancellationRequested) {
+                            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(connected.Token);
+                            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+                            await Report(timeout.Token);
+                            await Task.Delay(3000, connected.Token);
+                        }
+                    } finally {
+                        // A failed send must also release the receive loop so it can reconnect.
+                        connected.Cancel(); control?.Abort();
                     }
                 }, connected.Token);
                 while (control.State == WebSocketState.Open && !token.IsCancellationRequested)
                 {
-                    var command = await Receive(control, token);
+                    using var receiveTimeout = CancellationTokenSource.CreateLinkedTokenSource(connected.Token);
+                    receiveTimeout.CancelAfter(TimeSpan.FromSeconds(15));
+                    var command = await Receive(control, receiveTimeout.Token);
                     switch (command.GetProperty("command").GetString())
                     {
                         case "start":

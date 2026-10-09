@@ -2,6 +2,9 @@ import asyncio
 import json
 import time
 import os
+import hashlib
+import hmac
+import struct
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -19,6 +22,7 @@ def isolated_agents(tmp_path, monkeypatch):
     monkeypatch.setitem(main.CONFIG, 'mode', 'simulation')
     monkeypatch.setattr(main, 'ZONES', [{'id': 1, 'name': 'Salle'}])
     main.attempts.clear()
+    main.local_agents.clear(); main.agent_challenges.clear()
 
 
 def client():
@@ -34,7 +38,16 @@ def pair(c):
     code = c.post('/api/agents/pairing', json={}, headers=HEADERS).json()['code']
     response = c.post('/api/agents/pair', json={'name': 'PC musique', 'code': code})
     assert response.status_code == 200
+    bind_local(c, response.json())
     return response.json(), code
+
+
+def bind_local(c, agent):
+    challenge = c.post('/api/agents/local/challenge', json={}, headers=HEADERS).json()['challenge']
+    proof = hmac.new(hashlib.sha256(agent['token'].encode()).digest(), challenge.encode(), hashlib.sha256).hexdigest()
+    response = c.post('/api/agents/local', json={'challenge':challenge, 'proof':proof}, headers=HEADERS)
+    assert response.status_code == 200 and response.json()['id'] == agent['id']
+    return {'challenge':challenge, 'proof':proof}
 
 
 def test_pairing_expiry_authentication_and_persistence():
@@ -62,6 +75,8 @@ def test_agent_requires_web_command_then_relays_audio_and_stops():
         auth = {'authorization': 'Bearer ' + agent['token']}
         with c.websocket_connect('/api/agents/control', headers=auth) as control:
             assert control.receive_json()['command'] == 'connected'
+            control.send_json({'status': 'idle', 'heartbeat': True})
+            assert control.receive_json()['command'] == 'heartbeat'
             with c.websocket_connect('/api/live', headers=auth) as unauthorized:
                 unauthorized.send_json({'zones': [1]})
                 assert 'error' in unauthorized.receive_json()
@@ -124,5 +139,32 @@ def test_agent_download_is_served_as_attachment(tmp_path, monkeypatch):
     monkeypatch.setenv('PLAYER_AGENT_DOWNLOAD', str(path))
     with client() as c:
         response = c.get('/api/agents/download')
-        assert response.status_code == 200 and response.content == b'MZ-test'
+        assert response.status_code == 200 and response.content.startswith(b'MZ-test')
         assert 'attachment' in response.headers['content-disposition']
+        assert response.headers['cache-control'] == 'no-store'
+        assert response.content[-16:] == b'BODET_CONFIG_V1!'
+        length = struct.unpack('<I', response.content[-20:-16])[0]
+        bootstrap = json.loads(response.content[-20-length:-20])
+        assert bootstrap['Server'] == 'https://testserver'
+        # Tickets survive a server restart, and can register exactly one PC.
+        main.AGENTS = main.AgentRegistry(lambda: main.SETTINGS_PATH)
+        agent = c.post('/api/agents/pair', json={'code':bootstrap['Code'], 'name':'PC initial'})
+        assert agent.status_code == 200
+        assert c.post('/api/agents/pair', json={'code':bootstrap['Code'], 'name':'Autre PC'}).status_code == 401
+        assert bootstrap['Code'] not in (main.SETTINGS_PATH.parent / 'agent-installations.json').read_text()
+
+
+def test_browser_can_only_control_its_local_agent_and_proofs_cannot_be_replayed():
+    with client() as first, client() as second:
+        one, _ = pair(first)
+        two, _ = pair(second)
+        assert first.cookies.get('session_https') != second.cookies.get('session_https')
+        assert first.post(f"/api/agents/{two['id']}/start", json={'zones':[1]}, headers=HEADERS).status_code == 403
+        assert first.delete(f"/api/agents/{two['id']}", headers=HEADERS).status_code == 403
+        proof = bind_local(first, one)
+        assert second.post('/api/agents/local', json=proof, headers=HEADERS).status_code == 403
+        assert first.post('/api/agents/local', json=proof, headers=HEADERS).status_code == 403
+        main.active = {'kind':'agent', 'agent_id':two['id'], 'stop':False}
+        assert first.post('/api/stop', json={}, headers=HEADERS).status_code == 403
+        assert main.active['stop'] is False
+        main.active = None

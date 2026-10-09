@@ -3,6 +3,7 @@ let socket, context, stream, processor, running = false, busy = false;
 let networkDirty = false;
 let audioDirty = false;
 let agentsSignature = '';
+let localAgentId = '', localAgentChecked = 0, localAgentLookup = null;
 let playerSignature = '';
 let librarySignature = '', draftQueue = [], musicStatus = null, draggedTrack = null, ordering = false;
 let selectedSounds = new Set(), playlistsSignature = '', selectedPlaylist = '';
@@ -18,9 +19,32 @@ async function api(path, body, method = 'POST') {
   if (!response.ok) throw new Error(result.detail || 'Erreur du serveur');
   return result;
 }
+async function discoverLocalAgent(force = false) {
+  if (localAgentLookup) return localAgentLookup;
+  if (!force && Date.now() - localAgentChecked < 10000) return localAgentId;
+  localAgentLookup = (async () => {
+    try {
+      const challenge = await api('agents/local/challenge', {});
+      const response = await fetch(`http://127.0.0.1:17861/identity?challenge=${challenge.challenge}`, {
+        credentials:'omit', signal:AbortSignal.timeout(2000)
+      });
+      if (!response.ok) throw new Error('Agent local indisponible.');
+      const identity = await api('agents/local', await response.json());
+      localAgentId = identity.id;
+      $('agentPairCode').textContent = 'Agent de ce PC détecté. Le contrôle est limité à ce PC.';
+    } catch (error) {
+      localAgentId = '';
+      $('agentPairCode').textContent = 'Agent local non détecté. Lancez l’agent préconfiguré téléchargé ci-dessous et autorisez l’accès au réseau local si le navigateur le demande.';
+    } finally { localAgentChecked = Date.now(); localAgentLookup = null; }
+    return localAgentId;
+  })();
+  return localAgentLookup;
+}
 async function refresh() {
   try {
     const status = await api('status');
+    if (document.querySelector('input[name=source]:checked').value === 'agent' || status.active?.kind === 'agent')
+      await discoverLocalAgent();
     $('login').hidden = true; $('dashboard').hidden = false;
     $('settingsButton').hidden = false;
     settingsActive = !!status.active;
@@ -194,7 +218,7 @@ function renderPlayer(status) {
   $('deleteSelectedSounds').disabled = !!status.active || !selectedSounds.size;
 }
 function renderAgents(status) {
-  const agents = status.agents || [];
+  const agents = (status.agents || []).filter(agent => agent.id === localAgentId);
   const signature = JSON.stringify(agents);
   if (signature !== agentsSignature) {
     agentsSignature = signature;
@@ -219,16 +243,13 @@ function renderAgents(status) {
       row.append(label, revoke); $('agentList').append(row);
     });
   }
-  $('windowsAgent').disabled = !!status.active;
+  $('windowsAgent').disabled = true;
   const source = document.querySelector('input[name=source]:checked').value;
+  if (source === 'agent' && !agents.some(agent => agent.online)) $('start').disabled = true;
+  $('stop').disabled = status.active?.kind === 'agent' && status.active.agent_id !== localAgentId;
   $('agentSettings').hidden = source !== 'agent' && status.active?.kind !== 'agent';
 }
-$('pairWindowsAgent').onclick = async () => {
-  try {
-    const result = await api('agents/pairing', {});
-    $('agentPairCode').textContent = `Adresse du serveur : ${location.origin} · Code : ${result.code} · Valable 5 minutes, utilisable une seule fois.`;
-  } catch (error) { message(error.message); }
-};
+document.querySelector('.download-agent').href = `/api/agents/download?server=${encodeURIComponent(location.origin)}`;
 function renderPlaylists(status) {
   const playlists = status.playlists || [];
   if (selectedPlaylist && !playlists.some(p => p.id === selectedPlaylist)) {
@@ -418,6 +439,7 @@ document.querySelectorAll('input[name=source]').forEach(input => input.onchange 
     ? 'Autorisez le microphone pour diffuser votre voix.'
     : 'Dans Chrome ou Edge, choisissez un onglet et cochez « Partager l’audio de l’onglet ». Firefox ne permet pas cette capture ; utilisez l’agent Windows pour le son du PC.';
   if (musicStatus) renderPlayer(musicStatus);
+  refresh();
 });
 let uploading = false;
 async function uploadAudioFiles(files) {
@@ -473,8 +495,9 @@ $('start').onclick = async () => {
     if (!zones.length) throw new Error('Sélectionnez au moins une zone.');
     const source = document.querySelector('input[name=source]:checked').value;
     if (source === 'agent') {
-      if (!$('windowsAgent').value) throw new Error('Choisissez un agent Windows connecté.');
-      await api(`agents/${$('windowsAgent').value}/start`, {zones});
+      const agentId = await discoverLocalAgent(true);
+      if (!agentId) throw new Error('Aucun agent détecté sur ce PC. Téléchargez et lancez l’agent préconfiguré.');
+      await api(`agents/${agentId}/start`, {zones});
       busy = false; await refresh(); return;
     }
     if (source === 'library') {
@@ -523,6 +546,6 @@ $('start').onclick = async () => {
     await refresh();
   } catch (error) { message(error.message); await cleanup(); }
 };
-$('stop').onclick = async () => { try { await api('stop', {}); await cleanup(); await refresh(); } catch (error) { message(error.message); } };
+$('stop').onclick = async () => { try { if (musicStatus?.active?.kind === 'agent') await discoverLocalAgent(true); await api('stop', {}); await cleanup(); await refresh(); } catch (error) { message(error.message); } };
 $('logout').onclick = async () => { await cleanup(); await api('logout', {}); await refresh(); };
 setInterval(refresh, 2000); refresh();

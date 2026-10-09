@@ -12,12 +12,17 @@ const assert = require('node:assert/strict');
     page.on('pageerror', error => errors.push(error.message));
     const state = {mode:'simulation', zones:[{id:1, name:'Salle'}], active:null,
       multicast_address:'239.1.2.3', player:null, audio:{block_ms:20, max_backlog_ms:200},
-      agents:[{id:'pc1', name:'PC musique', online:true, status:'idle', error:''}],
+      agents:[{id:'pc1', name:'PC musique', online:true, status:'idle', error:''},
+              {id:'pc2', name:'Autre PC', online:true, status:'idle', error:''}],
       playlists:[], library:[{id:'abcdefghijk', title:'Première chanson', size:1000},
                {id:'12345678901', title:'Deuxième chanson', size:2000}]};
     await page.route('**/*', async route => {
       const request = route.request();
       const url = new URL(request.url());
+      if (url.hostname === '127.0.0.1' && url.pathname === '/identity') {
+        await route.fulfill({json:{challenge:url.searchParams.get('challenge'), proof:'1'.repeat(64)},
+          headers:{'Access-Control-Allow-Origin':'http://bodet-ui.test'}}); return;
+      }
       if (url.pathname.startsWith('/api/')) {
         const body = url.pathname === '/api/library/upload' ? null : request.postDataJSON();
         if (url.pathname === '/api/library/upload') {
@@ -25,13 +30,15 @@ const assert = require('node:assert/strict');
           state.library.push(track);
           await route.fulfill({json:track}); return;
         }
-        if (url.pathname === '/api/agents/pairing') {
-          await route.fulfill({json:{code:'0123456789ABCDEF', expires_in:300}}); return;
+        if (url.pathname === '/api/agents/local/challenge') {
+          await route.fulfill({json:{challenge:'0'.repeat(64)}}); return;
+        } else if (url.pathname === '/api/agents/local') {
+          await route.fulfill({json:{id:'pc1'}}); return;
         } else if (url.pathname === '/api/agents/pc1/start') {
           state.active = {kind:'agent', agent_id:'pc1', source:'PC musique', zones:body.zones, bytes:96000};
           state.agents[0].status = 'capturing';
         } else if (url.pathname === '/api/agents/pc1' && request.method() === 'DELETE') {
-          state.agents = [];
+          state.agents = state.agents.filter(agent => agent.id !== 'pc1');
         } else if (url.pathname === '/api/settings/audio') {
           state.audio = body;
           await route.fulfill({json:body}); return;
@@ -160,9 +167,11 @@ const assert = require('node:assert/strict');
     await page.waitForFunction(() => document.querySelector('#savedPlaylist').options.length === 1);
     assert.equal(state.library.length, 1);
     await page.locator('input[name=source][value=agent]').check();
-    await page.locator('#pairWindowsAgent').click();
-    await page.locator('#agentPairCode').filter({hasText:'0123456789ABCDEF'}).waitFor();
-    assert.equal(await page.locator('.download-agent').getAttribute('href'), '/api/agents/download');
+    await page.locator('#agentPairCode').filter({hasText:'Agent de ce PC détecté'}).waitFor();
+    assert.equal(await page.locator('#windowsAgent option').count(), 2);
+    assert.equal(await page.locator('#windowsAgent').textContent().then(value => value.includes('Autre PC')), false);
+    assert.equal(await page.locator('#pairWindowsAgent').count(), 0);
+    assert.equal(await page.locator('.download-agent').getAttribute('href'), '/api/agents/download?server=http%3A%2F%2Fbodet-ui.test');
     await page.locator('#start').click();
     await page.locator('#activity').filter({hasText:'PC musique'}).waitFor();
     assert.equal(state.active.kind, 'agent');
@@ -170,7 +179,10 @@ const assert = require('node:assert/strict');
     await page.waitForFunction(() => document.querySelector('#start').disabled === false);
     await page.getByRole('button', {name:'Retirer l’agent PC musique', exact:true}).click();
     await page.waitForFunction(() => document.querySelector('#windowsAgent').options.length === 1);
-    assert.deepEqual(state.agents, []);
+    assert.deepEqual(state.agents.map(agent => agent.id), ['pc2']);
+    state.active = {kind:'agent', agent_id:'pc2', source:'Autre PC', zones:[1], bytes:96000};
+    await page.evaluate(() => refresh());
+    assert.equal(await page.locator('#stop').isDisabled(), true);
     assert.deepEqual(errors, []);
     console.log('UI passed: HTTP playback, library, draft/live reorder, drag/drop, repeat, navigation, stop, delete, mobile layout.');
   } finally {

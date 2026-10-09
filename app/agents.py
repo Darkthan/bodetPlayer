@@ -41,7 +41,9 @@ class AgentRegistry:
 
     def pair(self, code, name):
         code = code.strip().replace("-", "").upper()
-        if self.codes.get(code, 0) <= time.time():
+        tickets = self.installation_tickets()
+        digest = hashlib.sha256(code.encode()).hexdigest()
+        if self.codes.get(code, 0) <= time.time() and tickets.get(digest, 0) <= time.time():
             raise HTTPException(401, "Code d’association invalide ou expiré.")
         records = self.records()
         if len(records) >= 100:
@@ -49,9 +51,39 @@ class AgentRegistry:
         token = secrets.token_urlsafe(32)
         record = {"id": secrets.token_hex(16), "name": name.strip() or "PC Windows",
                   "token_hash": hashlib.sha256(token.encode()).hexdigest()}
+        if digest in tickets:
+            tickets.pop(digest)
+            self.save_tickets(tickets)
         self.save(records + [record])
-        self.codes.pop(code)
+        self.codes.pop(code, None)
         return {"id": record["id"], "token": token}
+
+    def installation_tickets(self):
+        path = self.settings_path().parent / "agent-installations.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, ValueError):
+            raise HTTPException(500, "Impossible de lire les installations des agents.")
+
+    def save_tickets(self, tickets):
+        path = self.settings_path().parent / "agent-installations.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(tickets), encoding="utf-8")
+            temporary.replace(path)
+        except OSError:
+            raise HTTPException(500, "Impossible d’enregistrer l’installation de l’agent.")
+
+    def installation_code(self):
+        now = time.time()
+        tickets = {key: expiry for key, expiry in self.installation_tickets().items() if expiry > now}
+        if len(tickets) >= 100 or len(self.records()) >= 100:
+            raise HTTPException(409, "La limite d’association des agents est atteinte.")
+        code = secrets.token_hex(24).upper()
+        tickets[hashlib.sha256(code.encode()).hexdigest()] = now + 86400
+        self.save_tickets(tickets)
+        return code
 
     def authenticate(self, authorization):
         if not authorization or not authorization.startswith("Bearer ") or len(authorization) > 256:
