@@ -169,6 +169,8 @@ class AgentLocalProof(BaseModel):
 
 agent_challenges = {}
 local_agents = {}
+browser_controls = {}
+BROWSER_HEARTBEAT_TIMEOUT = 8
 
 
 def browser_session(request):
@@ -183,6 +185,7 @@ def require_local_agent(request, agent_id):
 
 class AgentStart(BaseModel):
     zones: list[StrictInt] = Field(min_length=1, max_length=100)
+    browser_id: str | None = Field(default=None, min_length=32, max_length=32)
 
 
 class ZoneSettings(BaseModel):
@@ -666,6 +669,10 @@ async def start_agent(agent_id: str, body: AgentStart, request: Request):
     authorize(request)
     require_local_agent(request, agent_id)
     async with lock:
+        if body.browser_id is not None:
+            owner = browser_controls.get(body.browser_id)
+            if not owner or owner["agent_id"] != agent_id or owner["session"] != browser_session(request):
+                raise HTTPException(403, "La connexion de cet onglet à l’agent est interrompue.")
         if active:
             raise HTTPException(409, "Une diffusion est déjà en cours.")
         connection = AGENTS.connections.get(agent_id)
@@ -679,7 +686,8 @@ async def start_agent(agent_id: str, body: AgentStart, request: Request):
         session = {"zones": sorted(set(body.zones)), "bytes": 0, "stop": False,
                    "source": record["name"], "kind": "agent", "agent_id": agent_id,
                    "agent_session": secrets.token_urlsafe(24), "started": time.time(),
-                   "multicast_address": MULTICAST, "audio": dict(AUDIO), "agent_connected": False}
+                   "multicast_address": MULTICAST, "audio": dict(AUDIO), "agent_connected": False,
+                   "browser_id": body.browser_id}
         active = session
         connection["error"] = ""
     try:
@@ -691,6 +699,79 @@ async def start_agent(agent_id: str, body: AgentStart, request: Request):
             if active is session:
                 active = None
         raise HTTPException(409, "La connexion avec l’agent a été interrompue.")
+    return {"ok": True}
+
+
+async def stop_agent_session(session):
+    """Stop this capture only; a stale tab must never stop a newer capture."""
+    global active
+    async with lock:
+        if active is not session or session.get("kind") != "agent":
+            return
+        session["stop"] = True
+        if not session.get("agent_connected"):
+            active = None
+        connection = AGENTS.connections.get(session["agent_id"])
+    if connection:
+        try:
+            await asyncio.wait_for(connection["socket"].send_json({"command": "stop", "session": session["agent_session"]}), 3)
+        except (RuntimeError, OSError, asyncio.TimeoutError):
+            pass
+
+
+@app.websocket("/api/agents/browser")
+async def browser_control(ws: WebSocket):
+    if not websocket_session(ws):
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    browser_id = None
+    heartbeat = None
+    try:
+        selected = await asyncio.wait_for(ws.receive_json(), 10)
+        agent_id = selected.get("agent_id")
+        require_local_agent(ws, agent_id)
+        browser_id = secrets.token_hex(16)
+        browser_controls[browser_id] = {"agent_id": agent_id, "session": browser_session(ws)}
+        await ws.send_json({"browser_id": browser_id})
+        async def ping():
+            while True:
+                await ws.send_json({"ping": True})
+                await asyncio.sleep(2)
+        heartbeat = asyncio.create_task(ping())
+        while websocket_session(ws):
+            report = await asyncio.wait_for(ws.receive_json(), BROWSER_HEARTBEAT_TIMEOUT)
+            if not isinstance(report, dict) or report.get("pong") is not True:
+                break
+    except (WebSocketDisconnect, RuntimeError, ValueError, AttributeError, HTTPException, asyncio.TimeoutError):
+        pass
+    finally:
+        if browser_id:
+            browser_controls.pop(browser_id, None)
+            session = active
+            if session and session.get("browser_id") == browser_id:
+                await stop_agent_session(session)
+        if heartbeat:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except (asyncio.CancelledError, RuntimeError, WebSocketDisconnect):
+                pass
+        try:
+            await ws.close()
+        except (RuntimeError, WebSocketDisconnect):
+            pass
+
+
+@app.post("/api/agents/browser/{browser_id}/stop")
+async def stop_closed_tab(browser_id: str, request: Request):
+    same_origin(request); authorize(request)
+    session = active
+    owner = browser_controls.get(browser_id)
+    if owner and owner["session"] != browser_session(request):
+        raise HTTPException(403, "Cet onglet ne contrôle pas cette diffusion.")
+    if owner and session and session.get("browser_id") == browser_id:
+        await stop_agent_session(session)
     return {"ok": True}
 
 

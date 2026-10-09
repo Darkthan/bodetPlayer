@@ -23,6 +23,7 @@ def isolated_agents(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'ZONES', [{'id': 1, 'name': 'Salle'}])
     main.attempts.clear()
     main.local_agents.clear(); main.agent_challenges.clear()
+    main.browser_controls.clear()
 
 
 def client():
@@ -168,3 +169,73 @@ def test_browser_can_only_control_its_local_agent_and_proofs_cannot_be_replayed(
         assert first.post('/api/stop', json={}, headers=HEADERS).status_code == 403
         assert main.active['stop'] is False
         main.active = None
+
+
+def test_closing_owner_tab_stops_audio_but_another_tab_does_not():
+    with client() as c:
+        agent, _ = pair(c)
+        auth = {'authorization': 'Bearer ' + agent['token']}
+        with c.websocket_connect('/api/agents/control', headers=auth) as control:
+            control.receive_json()
+            with c.websocket_connect('wss://testserver/api/agents/browser', headers=HEADERS) as owner:
+                owner.send_json({'agent_id':agent['id']})
+                owner_id = owner.receive_json()['browser_id']
+                owner.send_json({'pong':True})
+                assert c.post(f"/api/agents/{agent['id']}/start", json={'zones':[1], 'browser_id':owner_id}, headers=HEADERS).status_code == 200
+                command = control.receive_json()
+                with c.websocket_connect('/api/live', headers=auth) as audio:
+                    audio.send_json({'agent_session':command['session']})
+                    assert audio.receive_json()['ready']
+                    with c.websocket_connect('wss://testserver/api/agents/browser', headers=HEADERS) as other:
+                        other.send_json({'agent_id':agent['id']})
+                        other_id = other.receive_json()['browser_id']
+                        assert c.post(f'/api/agents/browser/{other_id}/stop', headers=HEADERS).status_code == 200
+                        assert main.active['stop'] is False
+                    assert main.active['stop'] is False
+                    owner.close()
+                    assert control.receive_json() == {'command':'stop', 'session':command['session']}
+                    audio.send_bytes(b'\x00\x00' * 480)
+                    assert audio.receive()['type'] == 'websocket.close'
+            assert main.active is None
+            with c.websocket_connect('wss://testserver/api/agents/browser', headers=HEADERS) as replacement:
+                replacement.send_json({'agent_id':agent['id']})
+                replacement_id = replacement.receive_json()['browser_id']
+                assert c.post(f"/api/agents/{agent['id']}/start", json={'zones':[1], 'browser_id':replacement_id}, headers=HEADERS).status_code == 200
+                control.receive_json()
+                # A delayed beacon from the previous tab cannot stop the new capture.
+                assert c.post(f'/api/agents/browser/{owner_id}/stop', headers=HEADERS).status_code == 200
+                assert main.active['stop'] is False
+
+
+def test_close_beacon_requires_owner_session_and_lost_heartbeat_stops_capture(monkeypatch):
+    monkeypatch.setattr(main, 'BROWSER_HEARTBEAT_TIMEOUT', .5)
+    with client() as c, client() as stranger:
+        agent, _ = pair(c)
+        with c.websocket_connect('/api/agents/control', headers={'authorization':'Bearer '+agent['token']}) as control:
+            control.receive_json()
+            with c.websocket_connect('wss://testserver/api/agents/browser', headers=HEADERS) as browser:
+                browser.send_json({'agent_id':agent['id']})
+                browser_id = browser.receive_json()['browser_id']
+                assert c.post(f"/api/agents/{agent['id']}/start", json={'zones':[1], 'browser_id':'0'*32}, headers=HEADERS).status_code == 403
+                assert c.post(f"/api/agents/{agent['id']}/start", json={'zones':[1], 'browser_id':browser_id}, headers=HEADERS).status_code == 200
+                command = control.receive_json()
+                assert stranger.post(f'/api/agents/browser/{browser_id}/stop', headers=HEADERS).status_code == 403
+                # Do not answer the heartbeat: simulate a frozen/crashed browser.
+                assert control.receive_json() == {'command':'stop', 'session':command['session']}
+                assert main.active is None
+
+
+def test_close_beacon_immediately_stops_pending_capture():
+    with client() as c:
+        agent, _ = pair(c)
+        with c.websocket_connect('/api/agents/control', headers={'authorization':'Bearer '+agent['token']}) as control:
+            control.receive_json()
+            with c.websocket_connect('wss://testserver/api/agents/browser', headers=HEADERS) as browser:
+                browser.send_json({'agent_id':agent['id']})
+                browser_id = browser.receive_json()['browser_id']
+                c.post(f"/api/agents/{agent['id']}/start", json={'zones':[1], 'browser_id':browser_id}, headers=HEADERS)
+                command = control.receive_json()
+                assert c.post(f'/api/agents/browser/{browser_id}/stop').status_code == 403
+                assert c.post(f'/api/agents/browser/{browser_id}/stop', headers=HEADERS, content='{}').status_code == 200
+                assert control.receive_json() == {'command':'stop', 'session':command['session']}
+                assert main.active is None

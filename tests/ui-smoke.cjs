@@ -13,6 +13,12 @@ const assert = require('node:assert/strict');
     const state = {mode:'bodet', zones:[{id:1,name:'Salle'}], active:null, multicast_address:'239.1.2.3',
       audio:{block_ms:20,max_backlog_ms:200}, agents:[{id:'pc1',name:'PC musique',online:true,status:'idle',error:''},
       {id:'pc2',name:'Autre PC',online:true,status:'idle',error:''}]};
+    await page.routeWebSocket('**/api/agents/browser', socket => {
+      socket.onMessage(message => {
+        const report = JSON.parse(message);
+        if (report.agent_id) socket.send(JSON.stringify({browser_id:'a'.repeat(32)}));
+      });
+    });
     await page.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url());
       if (url.hostname === '127.0.0.1') {
@@ -64,7 +70,7 @@ const assert = require('node:assert/strict');
     assert.equal(await page.locator('#zoneWarning').isHidden(), true);
     await page.locator('#start').click();
     await page.locator('#agentState').filter({hasText:'Diffusion en cours'}).waitFor({state:'attached'});
-    assert.deepEqual(starts,[{zones:[1]}]);
+    assert.deepEqual(starts,[{zones:[1],browser_id:'a'.repeat(32)}]);
     assert.equal(await page.locator('#start').isDisabled(), true);
     assert.equal(await page.locator('#stop').isEnabled(), true);
     await page.locator('#stop').click();

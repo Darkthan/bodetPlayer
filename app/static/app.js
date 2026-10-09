@@ -2,6 +2,7 @@ const $ = id => document.getElementById(id);
 let busy = false, networkDirty = false, audioDirty = false;
 let localAgentId = '', localAgentChecked = 0, localAgentLookup = null;
 let currentStatus = null, zonesSignature = '', currentZones = [], editingZone = null, settingsActive = false;
+let broadcastSocket = null, browserControlId = '', leavingPage = false;
 const message = text => { $('message').textContent = text; };
 async function api(path, body, method = 'POST') {
   const response = await fetch('/api/' + path, body === undefined ? {} : {
@@ -11,6 +12,43 @@ async function api(path, body, method = 'POST') {
   if (!response.ok) throw new Error(result.detail || 'Erreur du serveur');
   return result;
 }
+function closeBroadcastControl() {
+  browserControlId = '';
+  if (broadcastSocket) { broadcastSocket.close(); broadcastSocket = null; }
+}
+async function openBroadcastControl(agentId) {
+  closeBroadcastControl();
+  const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/agents/browser`);
+  broadcastSocket = socket;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { socket.close(); reject(new Error('La connexion de cet onglet ne répond pas.')); }, 10000);
+    socket.onopen = () => socket.send(JSON.stringify({agent_id:agentId}));
+    socket.onmessage = event => {
+      const report = JSON.parse(event.data);
+      if (report.ping) { if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({pong:true})); }
+      if (report.browser_id) {
+        clearTimeout(timeout); browserControlId = report.browser_id; resolve(browserControlId);
+      }
+    };
+    socket.onerror = () => { clearTimeout(timeout); reject(new Error('Connexion de cet onglet à l’agent impossible.')); };
+    socket.onclose = () => {
+      clearTimeout(timeout);
+      if (broadcastSocket === socket) { broadcastSocket = null; browserControlId = ''; }
+      reject(new Error('La connexion de cet onglet a été interrompue.'));
+      if (!leavingPage) refresh();
+    };
+  });
+}
+window.addEventListener('pagehide', () => {
+  leavingPage = true;
+  if (browserControlId) {
+    const endpoint = '/api/agents/browser/' + browserControlId + '/stop';
+    if (!navigator.sendBeacon(endpoint, new Blob(['{}'], {type:'application/json'})))
+      fetch(endpoint, {method:'POST', body:'{}', headers:{'Content-Type':'application/json'}, keepalive:true}).catch(() => {});
+  }
+  closeBroadcastControl();
+});
+window.addEventListener('pageshow', () => { leavingPage = false; });
 async function discoverLocalAgent(force = false) {
   if (localAgentLookup) return localAgentLookup;
   if (!force && Date.now() - localAgentChecked < 10000) return localAgentId;
@@ -121,20 +159,22 @@ $('start').onclick = async () => {
     if (networkDirty || audioDirty) throw new Error('Enregistrez les réglages dans les paramètres avant de diffuser.');
     const agentId = await discoverLocalAgent(true);
     if (!agentId) throw new Error('Aucun agent détecté sur ce PC. Vérifiez son icône près de l’horloge Windows.');
-    await api('agents/' + agentId + '/start', {zones}); message('');
-  } catch (error) { $('diffusionError').textContent = error.message; $('diffusionError').hidden = false; }
+    const browserId = await openBroadcastControl(agentId);
+    if (leavingPage) throw new Error('L’onglet est fermé.');
+    await api('agents/' + agentId + '/start', {zones, browser_id:browserId}); message('');
+  } catch (error) { closeBroadcastControl(); $('diffusionError').textContent = error.message; $('diffusionError').hidden = false; }
   finally { busy = false; await refresh(); }
 };
 $('stop').onclick = async () => {
   if (busy) return;
   busy = true; renderAgent(currentStatus);
   $('diffusionError').hidden = true;
-  try { await discoverLocalAgent(true); await api('stop', {}); message(''); }
+  try { await discoverLocalAgent(true); await api('stop', {}); closeBroadcastControl(); message(''); }
   catch (error) { $('diffusionError').textContent = error.message; $('diffusionError').hidden = false; }
   finally { busy = false; await refresh(); }
 };
 $('logout').onclick = async () => {
-  try { await api('logout', {}); currentStatus = null; await refresh(); }
+  try { closeBroadcastControl(); await api('logout', {}); currentStatus = null; await refresh(); }
   catch (error) { message(error.message); }
 };
 $('loginForm').onsubmit = async event => {
