@@ -173,8 +173,7 @@ internal sealed class AgentClient(AgentSettings settings, Action<string> status,
                 capture.RecordingStopped += (_, args) => { recordingError = args.Exception ?? new IOException("La sortie audio a été déconnectée."); };
                 capture.DataAvailable += (_, args) => {
                     try {
-                        if (provider.BufferedDuration.TotalMilliseconds > backlog) throw new IOException("Buffer audio dépassé. Choisissez un profil plus stable.");
-                        provider.AddSamples(args.Buffer, 0, args.BytesRecorded);
+                        AudioPipeline.AddLatest(provider, args.Buffer, args.BytesRecorded, backlog);
                     } catch (Exception error) { recordingError = error; }
                 };
                 capture.StartRecording();
@@ -183,7 +182,7 @@ internal sealed class AgentClient(AgentSettings settings, Action<string> status,
             status("Capture active — le son du PC est diffusé vers Bodet Player.");
             await Report(token);
             float[] samples = new float[block * 48]; byte[] pcm = new byte[samples.Length * 2];
-            var clock = Stopwatch.StartNew(); long blocks = 0;
+            var clock = Stopwatch.StartNew(); double deadline = 0;
             using var receiving = CancellationTokenSource.CreateLinkedTokenSource(token);
             var receiveTask = Task.Run(async () => {
                 try {
@@ -198,15 +197,15 @@ internal sealed class AgentClient(AgentSettings settings, Action<string> status,
                 while (!receiving.IsCancellationRequested)
                 {
                     if (recordingError is not null) throw recordingError;
-                    int read = mono.Read(samples, 0, samples.Length);
+                    int read;
+                    if (provider is null) read = mono.Read(samples, 0, samples.Length);
+                    else lock (provider) read = mono.Read(samples, 0, samples.Length);
                     if (read < samples.Length) Array.Clear(samples, read, samples.Length - read);
                     AudioPipeline.ToPcm(samples, pcm);
                     using var sendTimeout = CancellationTokenSource.CreateLinkedTokenSource(receiving.Token);
                     sendTimeout.CancelAfter(backlog);
                     await socket.SendAsync(pcm, WebSocketMessageType.Binary, true, sendTimeout.Token);
-                    blocks++;
-                    double delay = blocks * block - clock.Elapsed.TotalMilliseconds;
-                    if (delay < -backlog) throw new IOException("Réseau trop lent : capture arrêtée pour éviter l’accumulation de retard.");
+                    double delay = AudioPipeline.NextDelay(ref deadline, clock.Elapsed.TotalMilliseconds, block, backlog);
                     if (delay > 0) await Task.Delay(TimeSpan.FromMilliseconds(delay), receiving.Token);
                 }
                 await receiveTask;

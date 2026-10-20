@@ -1,5 +1,17 @@
 """Shared audio block and backlog limits for capture and server playback."""
 import os
+import struct
+
+
+def apply_volume(data, volume):
+    """Scale signed little-endian PCM16 before encoding or speaker playback."""
+    if volume == 100:
+        return data
+    if volume == 0:
+        return bytes(len(data))
+    gain = volume / 100
+    return b''.join(struct.pack('<h', int(sample * gain))
+                    for (sample,) in struct.iter_unpack('<h', data))
 
 
 def audio_settings(values=None):

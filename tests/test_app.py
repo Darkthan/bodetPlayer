@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import pytest
 
 os.environ['PLAYER_PASSWORD'] = 'test-password'
@@ -14,6 +15,7 @@ def isolated_network_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(main, 'active', None)
     monkeypatch.setattr(main, 'music_player', None)
     monkeypatch.setattr(main, 'AUDIO', main.audio_settings())
+    monkeypatch.setattr(main, 'VOLUME', 100)
     monkeypatch.setattr(main, 'AGENTS', main.AgentRegistry(lambda: main.SETTINGS_PATH))
     monkeypatch.setitem(main.CONFIG, 'mode', 'simulation')
     monkeypatch.setattr(main, 'SETTINGS_PATH', tmp_path / 'settings.json')
@@ -28,6 +30,88 @@ def client():
                            headers={'origin': 'https://testserver'})
     assert response.status_code == 200
     return result
+
+
+def test_global_volume_persists_and_can_change_during_playback():
+    headers = {'origin': 'https://testserver'}
+    with client() as c:
+        assert c.get('/api/status').json()['volume'] == 100
+        main.active = {'kind': 'playlist'}
+        for volume in (50, 0, 100):
+            response = c.post('/api/settings/volume', json={'volume': volume}, headers=headers)
+            assert response.status_code == 200
+            assert response.json()['volume'] == volume
+            assert main.load_volume() == volume
+        main.active = None
+        c.post('/api/settings/volume', json={'volume': 35}, headers=headers)
+        assert c.post('/api/settings/audio', json={'block_ms': 20, 'max_backlog_ms': 200}, headers=headers).status_code == 200
+        assert c.post('/api/settings/network', json={'multicast_address': '239.1.2.3'}, headers=headers).status_code == 200
+        assert main.load_volume() == 35
+        assert c.get('/api/status').json()['volume'] == 35
+
+
+def test_volume_auth_validation_and_agent_ownership():
+    headers = {'origin': 'https://testserver'}
+    with TestClient(main.app, base_url='https://testserver') as c:
+        assert c.post('/api/settings/volume', json={'volume': 50}, headers=headers).status_code == 401
+    with client() as c:
+        assert c.post('/api/settings/volume', json={'volume': 50}).status_code == 403
+        for volume in (-1, 101, True, '50', 12.5):
+            assert c.post('/api/settings/volume', json={'volume': volume}, headers=headers).status_code == 422
+        main.active = {'kind': 'agent', 'agent_id': 'another-pc'}
+        assert c.post('/api/settings/volume', json={'volume': 50}, headers=headers).status_code == 403
+        assert main.VOLUME == 100
+        main.local_agents[c.cookies.get('session_https')] = ('another-pc', time.monotonic() + 60)
+        assert c.post('/api/settings/volume', json={'volume': 50}, headers=headers).status_code == 200
+
+
+def test_live_volume_changes_scale_the_audio_sent_to_the_bridge(monkeypatch):
+    import struct
+    from types import SimpleNamespace
+    written = []
+
+    class Input:
+        transport = SimpleNamespace(set_write_buffer_limits=lambda **kwargs: None)
+
+        def write(self, data):
+            written.append(data)
+
+        async def drain(self):
+            pass
+
+    class Bridge:
+        stdin = Input()
+        returncode = None
+
+        def terminate(self):
+            self.returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def spawn(*args, **kwargs):
+        return Bridge()
+
+    monkeypatch.setattr(main, 'spawn', spawn)
+    async def terminate(process):
+        if process:
+            process.terminate()
+    monkeypatch.setattr(main, 'terminate', terminate)
+    monkeypatch.setitem(main.CONFIG, 'mode', 'bridge')
+    monkeypatch.setitem(main.CONFIG, 'bridge_command', ['test-bridge'])
+    headers = {'origin': 'https://testserver'}
+    pcm = struct.pack('<2h', -10000, 10000)
+    with client() as c:
+        with c.websocket_connect('wss://testserver/api/live', headers=headers) as audio:
+            audio.send_json({'zones': [1]})
+            assert audio.receive_json()['ready']
+            for index, (volume, expected) in enumerate(((50, (-5000, 5000)), (0, (0, 0)), (100, (-10000, 10000)))):
+                assert c.post('/api/settings/volume', json={'volume': volume}, headers=headers).status_code == 200
+                audio.send_bytes(pcm)
+                deadline = time.monotonic() + 2
+                while len(written) <= index and time.monotonic() < deadline:
+                    time.sleep(.01)
+                assert struct.unpack('<2h', written[index]) == expected
 
 
 def test_audio_upload_persists_and_plays(monkeypatch):
@@ -377,3 +461,43 @@ def test_file_player_security_and_download_removed():
         assert c.post('/api/player/order', json={'order':['x']}).status_code == 403
         assert c.post('/api/library/start', json=dict(body, zones=[True]), headers=headers).status_code == 422
         assert c.post('/api/youtube/start', json={'url':'https://youtu.be/abcdefghijk', 'zones':[1]}, headers=headers).status_code == 404
+
+
+def test_stalled_bridge_buffer_releases_session_and_allows_restart(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    cleaned = []
+
+    class Input:
+        transport = SimpleNamespace(set_write_buffer_limits=lambda **kwargs: None)
+        def write(self, data):
+            pass
+        async def drain(self):
+            raise asyncio.TimeoutError
+
+    class Bridge:
+        stdin = Input()
+        returncode = None
+
+    async def spawn(*args, **kwargs):
+        return Bridge()
+
+    async def terminate(process):
+        cleaned.append(process)
+
+    monkeypatch.setattr(main, 'spawn', spawn)
+    monkeypatch.setattr(main, 'terminate', terminate)
+    monkeypatch.setitem(main.CONFIG, 'mode', 'bridge')
+    monkeypatch.setitem(main.CONFIG, 'bridge_command', ['test-bridge'])
+    with client() as c:
+        for _ in range(3):
+            with c.websocket_connect('wss://testserver/api/live', headers={'origin': 'https://testserver'}) as audio:
+                audio.send_json({'zones': [1]})
+                assert audio.receive_json()['ready']
+                audio.send_bytes(bytes(1920))
+                assert 'error' in audio.receive_json()
+                deadline = time.monotonic() + 2
+                while main.active is not None and time.monotonic() < deadline:
+                    time.sleep(.01)
+                assert main.active is None
+        assert len(cleaned) == 3

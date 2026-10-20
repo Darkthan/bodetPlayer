@@ -3,6 +3,7 @@ let busy = false, networkDirty = false, audioDirty = false;
 let localAgentId = '', localAgentChecked = 0, localAgentLookup = null;
 let currentStatus = null, zonesSignature = '', currentZones = [], editingZone = null, settingsActive = false;
 let broadcastSocket = null, browserControlId = '', leavingPage = false;
+let volumePending = null, volumeSaving = false, volumeTimer = null;
 const message = text => { $('message').textContent = text; };
 async function api(path, body, method = 'POST') {
   const response = await fetch('/api/' + path, body === undefined ? {} : {
@@ -119,6 +120,11 @@ async function refresh() {
 function renderAgent(status) {
   const agent = (status.agents || []).find(item => item.id === localAgentId);
   const ownCapture = status.active?.kind === 'agent' && status.active.agent_id === localAgentId;
+  $('broadcastVolume').disabled = status.active?.kind === 'agent' && !ownCapture;
+  if (volumePending === null && !volumeSaving && document.activeElement !== $('broadcastVolume')) {
+    $('broadcastVolume').value = status.volume ?? 100;
+    renderVolumeValue();
+  }
   $('agentSettings').hidden = !!agent;
   $('agentName').textContent = agent?.name || 'Son de votre PC';
   $('agentState').textContent = !agent ? 'Agent non détecté' : !agent.online ? 'Connexion au serveur en attente' : ownCapture ? 'Diffusion en cours' : 'Prêt à diffuser';
@@ -143,6 +149,39 @@ function renderAgent(status) {
   $('diffusionState').textContent = agent?.error || (ownCapture ? '' : $('activity').textContent);
   $('diffusionState').hidden = !$('diffusionState').textContent;
 }
+function renderVolumeValue() {
+  const value = Number($('broadcastVolume').value);
+  $('volumeValue').textContent = value === 0 ? '0 % · Silence' : `${value} %`;
+  $('broadcastVolume').setAttribute('aria-valuetext', value === 0 ? 'Silence' : `${value} %`);
+}
+async function saveVolume() {
+  if (volumeSaving || volumePending === null) return;
+  volumeSaving = true;
+  const value = volumePending;
+  volumePending = null;
+  try {
+    const result = await api('settings/volume', {volume:value});
+    if (currentStatus) currentStatus.volume = result.volume;
+    $('volumeStatus').textContent = `Volume enregistré : ${value} %.`;
+  } catch (error) {
+    $('volumeStatus').textContent = error.message;
+    if (volumePending === null && currentStatus) {
+      $('broadcastVolume').value = currentStatus.volume ?? 100;
+      renderVolumeValue();
+    }
+  } finally {
+    volumeSaving = false;
+    if (volumePending !== null) saveVolume();
+  }
+}
+$('broadcastVolume').oninput = () => {
+  renderVolumeValue();
+  volumePending = Number($('broadcastVolume').value);
+  $('volumeStatus').textContent = 'Application du volume…';
+  clearTimeout(volumeTimer);
+  volumeTimer = setTimeout(saveVolume, 120);
+};
+$('broadcastVolume').onchange = () => { clearTimeout(volumeTimer); saveVolume(); };
 function clearZoneWarning() {
   if ($('zones').querySelector('input:checked')) {
     $('zoneWarning').hidden = true; $('zonesSection').classList.remove('needs-selection');

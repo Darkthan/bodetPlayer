@@ -68,6 +68,8 @@ Après modification de `.env`, relancer Compose. Restreindre l’accès au port 
 
 ## Utilisation
 
+Le curseur **Volume global de diffusion** règle le niveau du signal envoyé à toutes les zones sélectionnées, avant les réglages propres aux enceintes. Il fonctionne avant et pendant la diffusion : **0 %** coupe le son sans arrêter la capture et **100 %** conserve le niveau d’origine. La valeur est enregistrée dans le volume Docker et reste disponible après redémarrage. Ce réglage ne modifie ni le volume Windows ni la configuration des enceintes. Pendant une capture, seul le PC source peut le modifier.
+
 Cliquer sur le bouton bleu **Paramètres** en bas à droite. Dans **Configuration réseau**, saisir manuellement l’adresse multicast IPv4 de l’installation et cliquer sur **Enregistrer l’adresse**. La valeur initiale d’exemple est `239.192.55.1` : vérifier qu’elle correspond à Sigma. Seules les adresses de `224.0.0.0` à `239.255.255.255` sont acceptées. Arrêter toute diffusion avant de changer l’adresse. Le paramètre est conservé après redémarrage dans le volume Docker `player_data` ; `docker compose down -v` efface ce volume. Le mode simulation n’envoie toujours aucun paquet vers les enceintes.
 
 Ouvrir l’interface sur le PC source et se connecter. Elle propose uniquement la diffusion avec l’agent Windows local. Si aucun agent n’est détecté, le panneau **Installer l’agent** propose son téléchargement et une vérification locale. Dès que l’agent est détecté, ce panneau se masque et l’écran affiche directement son état et les zones à sélectionner.
@@ -79,11 +81,15 @@ Dans le même panneau, **Gérer les zones** permet d’ajouter, modifier ou supp
 ## Mise à jour
 
 ```sh
-git pull
-docker compose up -d --build --force-recreate
+git pull --ff-only origin main
+docker compose up -d --build --force-recreate --remove-orphans
 ```
 
 Recharger la page avec Ctrl+F5. L’interface ne propose plus les sources micro, onglet, fichiers ni playlists. Les données audio et playlists déjà stockées dans le volume Docker sont conservées ; les routes historiques côté serveur restent disponibles.
+
+Après cette mise à jour, **quitter l’ancien agent Windows depuis son icône de notification**, télécharger le nouvel agent depuis l’interface, puis le lancer. Son association existante est conservée. La reconstruction Docker met à jour le serveur et le fichier proposé au téléchargement, pas les agents déjà installés sur les PC.
+
+Le buffer de capture abandonne désormais les données trop anciennes après une pause ou une dérive des horloges, au lieu de bloquer la capture. Sa taille reste bornée. Une coupure réseau persistante arrête toujours la diffusion ; elle peut ensuite être relancée. Le serveur termine également le groupe de processus de la passerelle (FFmpeg inclus) avant de libérer la diffusion.
 
 ## Délai de diffusion
 

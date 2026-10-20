@@ -1,7 +1,20 @@
 import pytest
 
-from app.audio import audio_settings
+from app.audio import audio_settings, apply_volume
 from app.bodet_bridge import next_deadline
+
+
+@pytest.mark.parametrize('volume,expected', [
+    (100, [-32768, -10000, 0, 10000, 32767]),
+    (50, [-16384, -5000, 0, 5000, 16383]),
+    (0, [0, 0, 0, 0, 0]),
+])
+def test_volume_scales_pcm_samples_without_changing_block_size(volume, expected):
+    import struct
+    data = struct.pack('<5h', -32768, -10000, 0, 10000, 32767)
+    result = apply_volume(data, volume)
+    assert len(result) == len(data)
+    assert list(struct.unpack('<5h', result)) == expected
 
 
 @pytest.mark.parametrize('block,backlog,expected', [(10, 100, 960), (20, 200, 1920), (100, 1000, 9600)])

@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from app.audio import audio_settings
+from app.audio import audio_settings, apply_volume
 
 MAX_TRACKS = 100
 MAX_FILE_BYTES = 100 * 1024 * 1024
@@ -89,11 +89,12 @@ async def spawn(*args, **kwargs):
 
 
 class AudioPlayer:
-    def __init__(self, session, config, directory, finished):
+    def __init__(self, session, config, directory, finished, volume=lambda: 100):
         self.session = session
         self.config = dict(config)
         self.directory = Path(directory)
         self.finished = finished
+        self.volume = volume
         self.state = {"status": "loading", "queue": [], "index": 0, "loop": "off",
                       "title": "Chargement audio", "error": "", "warning": ""}
         self.changed = asyncio.Event()
@@ -167,7 +168,7 @@ class AudioPlayer:
                     if bridge:
                         if bridge.returncode is not None:
                             raise ValueError("La passerelle audio s’est arrêtée.")
-                        bridge.stdin.write(data)
+                        bridge.stdin.write(apply_volume(data, self.volume()))
                         await asyncio.wait_for(bridge.stdin.drain(), 3)
                 if await decoder.wait():
                     raise ValueError("Le fichier audio ne peut pas être décodé.")

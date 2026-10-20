@@ -21,6 +21,53 @@ def player(tmp_path):
     return playback.AudioPlayer(session, {"mode": "simulation"}, tmp_path, done), finished
 
 
+def test_playback_volume_is_read_for_each_block(tmp_path, monkeypatch):
+    import struct
+    from types import SimpleNamespace
+    p, _ = player(tmp_path)
+    p.config.update(mode='bridge', bridge_command=['test-bridge'])
+    written = []
+    volume = 100
+    p.volume = lambda: volume
+
+    class Input:
+        transport = SimpleNamespace(set_write_buffer_limits=lambda **kwargs: None)
+
+        def write(self, data):
+            written.append(struct.unpack('<h', data)[0])
+
+        async def drain(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Output:
+        levels = iter((50, 0, 100))
+
+        async def read(self, size):
+            nonlocal volume
+            volume = next(self.levels, None)
+            return b'' if volume is None else struct.pack('<h', 10000)
+
+    class Process:
+        returncode = None
+        stdin = Input()
+        stdout = Output()
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    async def spawn(*args, **kwargs):
+        return Process()
+
+    monkeypatch.setattr(playback, 'spawn', spawn)
+    asyncio.run(p.play(tmp_path / 'test.wav', tmp_path))
+    assert written == [5000, 0, 10000]
+    assert p.session['bytes'] == 6
+
+
 def test_queue_advances_and_finishes_without_repeat(tmp_path, monkeypatch):
     p, finished = player(tmp_path)
     played = []
@@ -186,3 +233,25 @@ def test_server_decoding_and_native_bridge_emit_multicast_on_loopback(tmp_path):
         datagram, _ = listener.recvfrom(2048)
         assert datagram.startswith(b'MEL')
         assert p.session['bytes'] == 48000
+
+
+def test_bridge_process_group_is_killed_after_shutdown_timeout(monkeypatch):
+    import signal
+    from types import SimpleNamespace
+    signals = []
+    waits = 0
+
+    async def wait():
+        nonlocal waits
+        waits += 1
+        if waits == 1:
+            raise asyncio.TimeoutError
+        return 0
+
+    process = SimpleNamespace(pid=12345, returncode=None, wait=wait)
+    monkeypatch.setattr(playback, 'signal', SimpleNamespace(SIGTERM=15, SIGKILL=9))
+    monkeypatch.setattr(playback, 'os', SimpleNamespace(name='posix',
+        killpg=lambda pid, sig: signals.append((pid, sig))))
+    asyncio.run(playback.terminate(process))
+    assert signals == [(12345, 15), (12345, 9)]
+    assert waits == 2

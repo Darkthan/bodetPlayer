@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StrictInt
 from app.playback import Library, AudioPlayer, MAX_FILE_BYTES, MAX_LIBRARY_BYTES, spawn, terminate
-from app.audio import audio_settings
+from app.audio import audio_settings, apply_volume
 from app.agents import AgentRegistry
 
 STATIC = Path(__file__).parent / "static"
@@ -49,12 +49,13 @@ ZONES = (json.loads(SETTINGS_PATH.read_text(encoding="utf-8")).get("zones", CONF
          if SETTINGS_PATH.exists() else CONFIG["zones"])
 
 
-def save_settings(address, zones, audio=None):
+def save_settings(address, zones, audio=None, volume=None):
     try:
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         temporary = SETTINGS_PATH.with_suffix(".tmp")
         temporary.write_text(json.dumps({"multicast_address": address, "zones": zones,
-                                        "audio": audio if audio is not None else AUDIO},
+                                        "audio": audio if audio is not None else AUDIO,
+                                        "volume": VOLUME if volume is None else volume},
                                         indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         temporary.replace(SETTINGS_PATH)
     except OSError:
@@ -110,6 +111,17 @@ def load_audio():
 
 
 AUDIO = load_audio()
+
+
+def load_volume():
+    settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8")) if SETTINGS_PATH.exists() else {}
+    value = settings.get("volume", 100)
+    if type(value) is not int or not 0 <= value <= 100:
+        raise ValueError("Le volume de diffusion doit être un entier entre 0 et 100 %.")
+    return value
+
+
+VOLUME = load_volume()
 AGENTS = AgentRegistry(lambda: SETTINGS_PATH)
 
 
@@ -155,6 +167,10 @@ class NetworkSettings(BaseModel):
 class AudioSettings(BaseModel):
     block_ms: StrictInt = Field(ge=10, le=100)
     max_backlog_ms: StrictInt = Field(ge=40, le=1000)
+
+
+class VolumeSettings(BaseModel):
+    volume: StrictInt = Field(ge=0, le=100)
 
 
 class AgentPair(BaseModel):
@@ -288,6 +304,7 @@ async def logout(request: Request):
 async def status(request: Request):
     authorize(request)
     return {"mode": CONFIG["mode"], "zones": ZONES, "active": active,
+            "volume": VOLUME,
             "multicast_address": MULTICAST,
             "player": music_player.snapshot() if music_player else None,
             "library": audio_library().list(),
@@ -339,7 +356,8 @@ async def library_start(body: LibraryStart, request: Request):
         session = {"zones": sorted(set(body.zones)), "bytes": 0, "stop": False,
                    "source": "Bibliothèque", "kind": "playlist", "started": time.time(),
                    "multicast_address": MULTICAST, "audio": dict(AUDIO)}
-        player = AudioPlayer(session, CONFIG, SETTINGS_PATH.parent / "youtube", playback_finished)
+        player = AudioPlayer(session, CONFIG, SETTINGS_PATH.parent / "youtube", playback_finished,
+                             volume=lambda: VOLUME)
         active = session
         music_player = player
         player.start_tracks(tracks, body.loop)
@@ -495,6 +513,19 @@ async def delete_playlist(playlist_id: str, request: Request):
             raise HTTPException(404, "Playlist introuvable.")
         save_playlists(remaining)
     return {"ok": True}
+
+
+@app.post("/api/settings/volume")
+async def update_volume(body: VolumeSettings, request: Request):
+    global VOLUME
+    same_origin(request)
+    authorize(request)
+    async with lock:
+        if active and active.get("kind") == "agent":
+            require_local_agent(request, active["agent_id"])
+        save_settings(MULTICAST, ZONES, volume=body.volume)
+        VOLUME = body.volume
+    return {"volume": VOLUME}
 
 
 @app.post("/api/settings/audio")
@@ -893,7 +924,7 @@ async def live(ws: WebSocket):
             env["BODET_INTERFACE"] = CONFIG.get("bodet_interface", "")
             env["PLAYER_AUDIO_BLOCK_MS"] = str(AUDIO["block_ms"])
             env["PLAYER_AUDIO_MAX_BACKLOG_MS"] = str(AUDIO["max_backlog_ms"])
-            process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
+            process = await spawn(*command, stdin=asyncio.subprocess.PIPE,
                                                           stdout=asyncio.subprocess.DEVNULL, env=env)
             process.stdin.transport.set_write_buffer_limits(high=AUDIO["max_backlog_bytes"],
                                                            low=AUDIO["max_backlog_bytes"] // 2)
@@ -919,7 +950,7 @@ async def live(ws: WebSocket):
             if process:
                 if process.returncode is not None:
                     raise ValueError("La passerelle audio s’est arrêtée.")
-                process.stdin.write(data)
+                process.stdin.write(apply_volume(data, VOLUME))
                 await asyncio.wait_for(process.stdin.drain(), 2)
     except WebSocketDisconnect:
         pass
@@ -929,16 +960,14 @@ async def live(ws: WebSocket):
         except (RuntimeError, WebSocketDisconnect):
             pass
     finally:
-        if process and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), 3)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-        async with lock:
-            if session is not None and active is session:
-                active = None
+        # Release the reservation even when process cleanup fails. Kill the whole
+        # bridge group, including FFmpeg, rather than leaving inherited pipes open.
+        try:
+            await terminate(process)
+        finally:
+            async with lock:
+                if session is not None and active is session:
+                    active = None
         if agent and session:
             connection = AGENTS.connections.get(agent["id"])
             if connection:

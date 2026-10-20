@@ -10,7 +10,7 @@ const assert = require('node:assert/strict');
     const errors = [], starts = [];
     page.on('pageerror', error => errors.push(error.message));
     let available = false;
-    const state = {mode:'bodet', zones:[{id:1,name:'Salle'}], active:null, multicast_address:'239.1.2.3',
+    const state = {mode:'bodet', volume:100, zones:[{id:1,name:'Salle'}], active:null, multicast_address:'239.1.2.3',
       audio:{block_ms:20,max_backlog_ms:200}, agents:[{id:'pc1',name:'PC musique',online:true,status:'idle',error:''},
       {id:'pc2',name:'Autre PC',online:true,status:'idle',error:''}]};
     await page.routeWebSocket('**/api/agents/browser', socket => {
@@ -35,6 +35,7 @@ const assert = require('node:assert/strict');
           starts.push(body); state.active = {kind:'agent',agent_id:'pc1',zones:body.zones,bytes:96000};
         } else if (url.pathname === '/api/stop') state.active = null;
         else if (url.pathname === '/api/settings/audio') state.audio = body;
+        else if (url.pathname === '/api/settings/volume') state.volume = body.volume;
         else if (url.pathname === '/api/settings/network') state.multicast_address = body.multicast_address;
         else if (url.pathname === '/api/settings/zones' && request.method() === 'POST') state.zones.push(body);
         else if (url.pathname.startsWith('/api/settings/zones/')) {
@@ -42,7 +43,7 @@ const assert = require('node:assert/strict');
           state.zones = state.zones.filter(zone => zone.id !== id);
           if (request.method() === 'PUT') state.zones.push(body);
         }
-        await route.fulfill({json:url.pathname === '/api/status' ? state : {ok:true,multicast_address:state.multicast_address}}); return;
+        await route.fulfill({json:url.pathname === '/api/status' ? state : {ok:true,volume:state.volume,multicast_address:state.multicast_address}}); return;
       }
       const relative = url.pathname === '/' ? 'index.html' : url.pathname.replace('/static/', '');
       await route.fulfill({body:fs.readFileSync(path.join(__dirname,'..','app','static',relative)),
@@ -71,6 +72,13 @@ const assert = require('node:assert/strict');
     await page.locator('#agentState').filter({hasText:'Diffusion en cours'}).waitFor({state:'attached'});
     assert.equal(await page.locator('#livePanel').isVisible(), true);
     assert.equal(await page.locator('#liveZones').textContent(), 'Salle');
+    await page.locator('#broadcastVolume').fill('45');
+    await page.locator('#volumeStatus').filter({hasText:'Volume enregistré : 45 %'}).waitFor();
+    assert.equal(state.volume, 45);
+    await page.locator('#broadcastVolume').fill('0');
+    await page.locator('#volumeStatus').filter({hasText:'Volume enregistré : 0 %'}).waitFor();
+    assert.match(await page.locator('#volumeValue').textContent(), /Silence/);
+    assert.equal(starts.length, 1);
     fs.mkdirSync(path.join(__dirname,'..','.benchmarks'),{recursive:true});
     await page.screenshot({path:path.join(__dirname,'..','.benchmarks','agent-ui-live.png'),fullPage:true});
     assert.deepEqual(starts,[{zones:[1],browser_id:'a'.repeat(32)}]);

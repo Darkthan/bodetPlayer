@@ -24,6 +24,30 @@ internal sealed class MonoProvider(ISampleProvider source) : ISampleProvider
 
 internal static class AudioPipeline
 {
+    // Keep recent audio after a scheduling pause or capture/render clock drift.
+    // The caller also locks the provider while reading it.
+    public static void AddLatest(BufferedWaveProvider provider, byte[] data, int count, int backlog)
+    {
+        lock (provider)
+        {
+            if (provider.BufferedDuration.TotalMilliseconds > backlog
+                || provider.BufferedBytes + count > provider.BufferLength)
+                provider.ClearBuffer();
+            // A single WASAPI callback can itself exceed a very small buffer.
+            int keep = Math.Min(count, provider.BufferLength);
+            keep -= keep % provider.WaveFormat.BlockAlign;
+            provider.AddSamples(data, count - keep, keep);
+        }
+    }
+
+    public static double NextDelay(ref double deadline, double elapsed, int block, int backlog)
+    {
+        // Rebase after a long pause; do not burst stale blocks or stop permanently.
+        deadline += block;
+        if (elapsed - deadline > backlog) deadline = elapsed;
+        return Math.Max(0, deadline - elapsed);
+    }
+
     public static ISampleProvider Convert(IWaveProvider source)
     {
         ISampleProvider mono = new MonoProvider(source.ToSampleProvider());
@@ -43,6 +67,23 @@ internal static class AudioPipeline
 
     public static void SelfTest()
     {
+        var bounded = new BufferedWaveProvider(new WaveFormat(48000, 16, 1)) {
+            BufferDuration = TimeSpan.FromMilliseconds(100)
+        };
+        byte[] callback = new byte[1920];
+        for (int i = 0; i < 10000; i++) AddLatest(bounded, callback, callback.Length, 100);
+        if (bounded.BufferedBytes > bounded.BufferLength) throw new Exception("Buffer non borné.");
+        AddLatest(bounded, new byte[19200], 19200, 100);
+        if (bounded.BufferedBytes != bounded.BufferLength) throw new Exception("Callback audio trop long.");
+        double deadline = 0;
+        for (int i = 0; i < 100000; i++) {
+            double elapsed = i * 20.002;
+            double delay = NextDelay(ref deadline, elapsed, 20, 200);
+            if (delay > 20.01) throw new Exception("Dérive de l’horloge audio.");
+        }
+        double resumed = 3000000;
+        if (NextDelay(ref deadline, resumed, 20, 200) != 0 || deadline != resumed)
+            throw new Exception("Reprise après suspension audio.");
         var source = new BufferedWaveProvider(WaveFormat.CreateIeeeFloatWaveFormat(44100, 2));
         var raw = new byte[44100 * 8];
         var input = Enumerable.Range(0, 44100 * 2).Select(i => i % 2 == 0 ? .75f : .25f).ToArray();
