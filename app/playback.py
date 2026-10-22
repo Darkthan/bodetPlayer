@@ -135,7 +135,7 @@ class AudioPlayer:
 
     async def play(self, path, root):
         decoder = bridge = None
-        settings = audio_settings(self.session.get("audio"))
+        settings = audio_settings()
         # Logs go to files to avoid stderr pipe backpressure while forwarding PCM.
         with tempfile.TemporaryFile(dir=root) as errors:
             try:
@@ -153,8 +153,6 @@ class AudioPlayer:
                     env["PLAYER_AUDIO_MAX_BACKLOG_MS"] = str(settings["max_backlog_ms"])
                     bridge = await spawn(*command, stdin=asyncio.subprocess.PIPE,
                                          stdout=asyncio.subprocess.DEVNULL, stderr=errors, env=env)
-                    bridge.stdin.transport.set_write_buffer_limits(high=settings["max_backlog_bytes"],
-                                                                 low=settings["max_backlog_bytes"] // 2)
                 elif self.config["mode"] != "simulation":
                     raise ValueError("Mode audio inconnu.")
                 decoder = await spawn("ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",

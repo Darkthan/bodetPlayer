@@ -9,7 +9,7 @@ def server_options():
         raise ValueError("PLAYER_PORT doit être compris entre 1024 et 65535.")
     audio_settings()
     options = {"host": "0.0.0.0", "port": port, "ws_max_size": 65536, "proxy_headers": False,
-               "ws_max_queue": 1}
+               "ws_max_queue": 32}
     return options
 
 

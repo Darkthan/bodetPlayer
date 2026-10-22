@@ -44,7 +44,7 @@ def test_global_volume_persists_and_can_change_during_playback():
             assert main.load_volume() == volume
         main.active = None
         c.post('/api/settings/volume', json={'volume': 35}, headers=headers)
-        assert c.post('/api/settings/audio', json={'block_ms': 20, 'max_backlog_ms': 200}, headers=headers).status_code == 200
+        assert c.post('/api/settings/audio', json={'block_ms': 20, 'max_backlog_ms': 200}, headers=headers).status_code == 410
         assert c.post('/api/settings/network', json={'multicast_address': '239.1.2.3'}, headers=headers).status_code == 200
         assert main.load_volume() == 35
         assert c.get('/api/status').json()['volume'] == 35
@@ -313,33 +313,29 @@ def test_native_server_port_http_only(monkeypatch):
         server_options()
 
 
-def test_websocket_queue_keeps_only_one_audio_block(monkeypatch):
+def test_websocket_queue_restores_transport_default(monkeypatch):
     from app.serve import server_options
     monkeypatch.setenv('PLAYER_PORT', '8080')
     monkeypatch.setenv('PLAYER_AUDIO_BLOCK_MS', '10')
     monkeypatch.setenv('PLAYER_AUDIO_MAX_BACKLOG_MS', '100')
-    assert server_options()['ws_max_queue'] == 1
+    assert server_options()['ws_max_queue'] == 32
 
 
-def test_buffer_settings_persistence_and_validation(monkeypatch):
+def test_removed_buffer_settings_ignore_saved_values_and_reject_changes(monkeypatch):
     headers = {'origin': 'https://testserver'}
+    body = {'block_ms': 10, 'max_backlog_ms': 100}
+    monkeypatch.setenv('PLAYER_AUDIO_BLOCK_MS', '100')
+    monkeypatch.setenv('PLAYER_AUDIO_MAX_BACKLOG_MS', '1000')
+    main.SETTINGS_PATH.write_text(json.dumps({'audio': body}), encoding='utf-8')
+    assert main.load_audio() == main.audio_settings()
     with client() as c:
-        body = {'block_ms': 10, 'max_backlog_ms': 100}
         assert c.post('/api/settings/audio', json=body).status_code == 403
-        assert c.post('/api/settings/audio', json=body, headers=headers).json() == body
-        assert c.get('/api/status').json()['audio'] == body
-        assert main.load_audio()['pcm_bytes'] == 960
-        # Other settings writes must retain the saved buffer settings.
+        assert c.post('/api/settings/audio', json=body, headers=headers).status_code == 410
+        assert c.get('/api/status').json()['audio'] == {'block_ms': 20, 'max_backlog_ms': 200}
         assert c.post('/api/settings/network', json={'multicast_address': '239.1.2.3'}, headers=headers).status_code == 200
-        assert main.load_audio()['max_backlog_ms'] == 100
-        for invalid in [{'block_ms': 100, 'max_backlog_ms': 100},
-                        {'block_ms': 9, 'max_backlog_ms': 100},
-                        {'block_ms': 20, 'max_backlog_ms': 1001},
-                        {'block_ms': 10.5, 'max_backlog_ms': 100}]:
-            assert c.post('/api/settings/audio', json=invalid, headers=headers).status_code == 422
-        assert main.load_audio()['block_ms'] == 10
-        monkeypatch.setattr(main, 'active', {'kind': 'playlist'})
-        assert c.post('/api/settings/audio', json=body, headers=headers).status_code == 409
+        assert main.load_audio()['pcm_bytes'] == 1920
+        saved = json.loads(main.SETTINGS_PATH.read_text(encoding='utf-8'))
+        assert saved['audio']['block_ms'] == 20
     with TestClient(main.app, base_url='https://testserver') as c:
         assert c.post('/api/settings/audio', json=body, headers=headers).status_code == 401
 

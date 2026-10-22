@@ -95,27 +95,9 @@ Le buffer de capture abandonne désormais les données trop anciennes après une
 
 La passerelle limite l’analyse initiale de FFmpeg et transmet les blocs MP3 disponibles sans attendre de remplir 1000 octets (125 ms à 64 kbit/s). Le rythme de diffusion et le format MEL restent conservés. Le délai réel dépend aussi du navigateur, du réseau et des buffers des enceintes ; il doit être mesuré sur l’installation. Pour appliquer une mise à jour sur le serveur : `docker compose up -d --build --force-recreate`.
 
-Le panneau **Paramètres → Buffer audio** permet de régler la taille des blocs et l’attente maximale en millisecondes. Trois profils sont proposés : **Faible délai** (10 / 100 ms), **Équilibré** (20 / 200 ms) et **Réseau instable** (40 / 500 ms). Arrêter la diffusion, choisir les valeurs puis cliquer sur **Enregistrer le buffer**. Les réglages sont conservés dans le volume Docker, restent présents après une modification des zones ou du multicast, et s’appliquent à la prochaine diffusion sans redémarrage. Ils règlent la capture navigateur et le décodage des playlists. Le découpage des paquets multicast Bodet reste indépendant de ces valeurs pour préserver la compatibilité des récepteurs.
+Le choix du buffer a été retiré des paramètres. La capture et le décodage utilisent des blocs fixes de 20 ms. Les anciens profils enregistrés et les variables `PLAYER_AUDIO_BLOCK_MS` / `PLAYER_AUDIO_MAX_BACKLOG_MS` sont ignorés ; aucune suppression du volume Docker n'est nécessaire.
 
-Les valeurs enregistrées dans l’interface sont prioritaires sur les valeurs initiales de `.env` :
-
-```env
-PLAYER_AUDIO_BLOCK_MS=20
-PLAYER_AUDIO_MAX_BACKLOG_MS=200
-```
-
-`PLAYER_AUDIO_BLOCK_MS` fixe la taille des blocs PCM du navigateur et du décodage serveur. Il ne change pas le découpage multicast Bodet : la passerelle lit les données MP3 disponibles avec un plafond fixe de 1000 octets, sans attendre de remplir un paquet. Valeurs de 10 à 100 ms ; valeur initiale 20 ms. Pour un réseau stable, essayer 10 ms. Des blocs plus petits augmentent le nombre de messages PCM. Ils ne réduisent pas la durée des trames du codec MP3 ni le buffer des enceintes.
-
-`PLAYER_AUDIO_MAX_BACKLOG_MS` borne le son en attente d’envoi dans le navigateur et règle le seuil de contre-pression des pipes serveur. La file de réception WebSocket reste limitée à un bloc pour éviter une attente supplémentaire indépendante des réglages. Valeurs de 40 à 1000 ms, au moins deux fois la taille du bloc ; valeur initiale 200 ms. Pour privilégier une faible latence, essayer 100 ms. Lorsque le navigateur dépasse cette limite, la capture s’arrête avec un message plutôt que d’accumuler du retard. Augmenter la limite en cas de coupures sur un réseau instable. Ce sont des limites par étape, et non une promesse de délai total ou un délai ajouté volontairement.
-
-La cadence multicast conserve une horloge audio continue pour éviter que les petits retards d’ordonnancement ne s’additionnent pendant une longue diffusion. Le buffer interne des enceintes Harmonys reste indépendant et n’est pas piloté par cette application. La réception et le délai final doivent être vérifiés sur les enceintes après un changement.
-
-Les fichiers Compose fournis transmettent ces variables au conteneur. Si vous utilisez un Compose personnalisé, ajoutez sous `environment` :
-
-```yaml
-      PLAYER_AUDIO_BLOCK_MS: ${PLAYER_AUDIO_BLOCK_MS:-20}
-      PLAYER_AUDIO_MAX_BACKLOG_MS: ${PLAYER_AUDIO_MAX_BACKLOG_MS:-200}
-```
+La passerelle retrouve la cadence multicast antérieure à l'ajout des réglages : après un retard, elle attend la durée audio du paquet sans émettre de rafale pour rattraper l'horloge. Les lectures PCM de FFmpeg restent fixées à 1920 octets et les paquets MP3 conservent leur plafond de 1000 octets. Ce retour au comportement antérieur vise les craquements apparus après cette modification ; l'écoute sur les enceintes reste nécessaire pour confirmer leur disparition.
 
 ### Son du PC dans Firefox
 
@@ -133,7 +115,7 @@ L’exécutable est copié dans `%LOCALAPPDATA%/BodetPlayer/BodetAgent.exe` et s
 
 Pour mettre à jour un agent déjà installé, reconstruire le serveur, télécharger la nouvelle version, quitter l’ancien agent depuis son icône puis lancer le nouveau fichier. Il retrouve l’association existante et met à jour sa copie installée. Les agents installés avant cette version doivent être mis à jour une fois pour bénéficier du démarrage automatique.
 
-La capture utilise [WASAPI loopback via NAudio](https://github.com/naudio/NAudio/blob/v2.2.1/Docs/WasapiLoopbackCapture.md) sur la sortie Windows par défaut au moment du démarrage. Tous les sons des applications dirigés vers cette sortie sont transmis : aucun filtrage par application. Changer de sortie nécessite d’arrêter puis de redémarrer la diffusion. Un pilote, une sortie déconnectée ou un contenu protégé peut limiter la capture. Le son est converti en PCM mono 16 bits à 48 kHz et envoyé directement au serveur via WebSocket ; l’audio ne passe pas par le navigateur et n’est pas enregistré sur disque. Le buffer configuré dans les paramètres s’applique aux blocs envoyés et à l’attente maximale ; le délai du pilote audio et des enceintes reste indépendant. Pendant le silence, l’agent envoie des blocs silencieux pour maintenir la session.
+La capture utilise [WASAPI loopback via NAudio](https://github.com/naudio/NAudio/blob/v2.2.1/Docs/WasapiLoopbackCapture.md) sur la sortie Windows par défaut au moment du démarrage. Tous les sons des applications dirigés vers cette sortie sont transmis : aucun filtrage par application. Changer de sortie nécessite d’arrêter puis de redémarrer la diffusion. Un pilote, une sortie déconnectée ou un contenu protégé peut limiter la capture. Le son est converti en PCM mono 16 bits à 48 kHz et envoyé directement au serveur via WebSocket ; l’audio ne passe pas par le navigateur et n’est pas enregistré sur disque. Le profil fixe s’applique aux blocs envoyés et à l’attente maximale ; le délai du pilote audio et des enceintes reste indépendant. Pendant le silence, l’agent envoie des blocs silencieux pour maintenir la session.
 
 L’audio et le contrôle utilisent des connexions sortantes HTTP/WebSocket vers Bodet Player. L’adresse doit être accessible depuis le PC source. Avec HTTPS, le certificat doit être approuvé par Windows ; aucune validation de certificat n’est désactivée. Le reverse proxy doit laisser passer les WebSockets pour `/api/agents/control`, `/api/agents/browser` et `/api/live`. L’agent reçoit uniquement des commandes de capture et d’arrêt, pas de commandes système.
 

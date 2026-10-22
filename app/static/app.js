@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let busy = false, networkDirty = false, audioDirty = false;
+let busy = false, networkDirty = false;
 let localAgentId = '', localAgentChecked = 0, localAgentLookup = null;
 let currentStatus = null, zonesSignature = '', currentZones = [], editingZone = null, settingsActive = false;
 let broadcastSocket = null, browserControlId = '', leavingPage = false;
@@ -86,10 +86,6 @@ async function refresh() {
     $('zoneList').querySelectorAll('button').forEach(button => button.disabled = settingsActive);
     if (!networkDirty) $('multicast').value = status.multicast_address;
     $('multicast').disabled = settingsActive; $('saveNetwork').disabled = settingsActive;
-    $('audioFields').disabled = settingsActive;
-    if (!audioDirty && status.audio) {
-      $('audioBlock').value = status.audio.block_ms; $('audioBacklog').value = status.audio.max_backlog_ms;
-    }
     $('mode').hidden = status.mode !== 'simulation';
     $('mode').textContent = 'Mode simulation : le son arrive au serveur sans être envoyé aux enceintes.';
     const signature = JSON.stringify(status.zones);
@@ -205,7 +201,7 @@ $('start').onclick = async () => {
   if (busy) return;
   busy = true; renderAgent(currentStatus);
   try {
-    if (networkDirty || audioDirty) throw new Error('Enregistrez les réglages dans les paramètres avant de diffuser.');
+    if (networkDirty) throw new Error('Enregistrez les réglages dans les paramètres avant de diffuser.');
     const agentId = await discoverLocalAgent(true);
     if (!agentId) throw new Error('Aucun agent détecté sur ce PC. Vérifiez son icône près de l’horloge Windows.');
     const browserId = await openBroadcastControl(agentId);
@@ -276,23 +272,6 @@ $('zoneForm').onsubmit = async event => {
   finally { $('saveZone').disabled = false; }
 };
 $('multicast').oninput = () => { networkDirty = true; $('networkStatus').textContent = ''; };
-for (const id of ['audioBlock', 'audioBacklog']) $(id).oninput = () => {
-  audioDirty = true; $('audioStatus').textContent = '';
-};
-for (const [id, block, backlog] of [['audioFast', 10, 100], ['audioBalanced', 20, 200], ['audioStable', 40, 500]]) {
-  $(id).onclick = () => {
-    $('audioBlock').value = block; $('audioBacklog').value = backlog;
-    audioDirty = true; $('audioStatus').textContent = 'Cliquez sur Enregistrer pour appliquer ce profil.';
-  };
-}
-$('audioForm').onsubmit = async event => {
-  event.preventDefault(); $('saveAudio').disabled = true;
-  try {
-    await api('settings/audio', {block_ms:Number($('audioBlock').value), max_backlog_ms:Number($('audioBacklog').value)});
-    audioDirty = false; $('audioStatus').textContent = 'Réglages enregistrés pour la prochaine diffusion.';
-  } catch (error) { $('audioStatus').textContent = error.message; }
-  finally { $('saveAudio').disabled = false; await refresh(); }
-};
 $('networkForm').onsubmit = async event => {
   event.preventDefault();
   $('saveNetwork').disabled = true;

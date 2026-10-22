@@ -12,13 +12,12 @@ import struct
 import subprocess
 import sys
 import time
-from app.audio import audio_settings
 
 
-def next_deadline(previous, now, duration, max_lag):
-    # Preserve the audio clock instead of adding every scheduling delay to it.
-    # After a long source interruption, allow at most one block of catch-up.
-    return max(previous if previous is not None else now, now - max_lag) + duration
+def next_deadline(previous, now, duration):
+    # Restore the pre-buffer-control cadence: a late packet never shortens the
+    # following interval to catch up. Receivers need time to consume its audio.
+    return max(previous if previous is not None else now, now) + duration
 
 
 def packet(sequence, zones, audio):
@@ -48,15 +47,13 @@ def main():
     if quality not in ("low", "high"):
         raise ValueError("Qualité Bodet invalide.")
     rate, bitrate = (32000, 64000) if quality == "low" else (48000, 256000)
-    settings = audio_settings()
     # Capture blocks are PCM transport settings, not MEL packet sizes.
     # Keep the original encoded-output packetization for receiver compatibility.
     mp3_bytes = 1000
-    block_seconds = mp3_bytes * 8 / bitrate
     encoder = subprocess.Popen([
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-probesize", "32", "-analyzeduration", "0",
-        "-f", "s16le", "-ar", "48000", "-ac", "1", "-blocksize", str(settings["pcm_bytes"]), "-i", "pipe:0",
+        "-f", "s16le", "-ar", "48000", "-ac", "1", "-blocksize", "1920", "-i", "pipe:0",
         "-ac", "1", "-ar", str(rate), "-c:a", "libmp3lame", "-b:a", str(bitrate),
         "-write_xing", "0", "-id3v2_version", "0", "-flush_packets", "1",
         "-f", "mp3", "pipe:1"], stdin=sys.stdin.buffer, stdout=subprocess.PIPE)
@@ -86,7 +83,7 @@ def main():
                 sender.sendto(message, (address, 1681))
                 sender.sendto(message, (address, 1681))
                 sequence += 1
-                deadline = next_deadline(deadline, now, len(audio) * 8 / bitrate, block_seconds)
+                deadline = next_deadline(deadline, now, len(audio) * 8 / bitrate)
                 time.sleep(max(0, deadline - time.monotonic()))
         if encoder.wait(timeout=3):
             raise RuntimeError("Échec de l’encodage MP3.")

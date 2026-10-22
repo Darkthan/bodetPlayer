@@ -1,5 +1,4 @@
 """Shared audio block and backlog limits for capture and server playback."""
-import os
 import struct
 
 
@@ -16,8 +15,10 @@ def apply_volume(data, volume):
 
 def audio_settings(values=None):
     try:
-        block = int(values["block_ms"] if values is not None else os.getenv("PLAYER_AUDIO_BLOCK_MS", "20"))
-        backlog = int(values["max_backlog_ms"] if values is not None else os.getenv("PLAYER_AUDIO_MAX_BACKLOG_MS", "200"))
+        # Fixed transport profile. Old environment variables and persisted
+        # presets must not silently reactivate configurable buffer behavior.
+        block = int(values["block_ms"] if values is not None else 20)
+        backlog = int(values["max_backlog_ms"] if values is not None else 200)
     except ValueError:
         raise ValueError("Les réglages de buffer audio doivent être des entiers en millisecondes.")
     if not 10 <= block <= 100:

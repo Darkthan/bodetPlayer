@@ -106,8 +106,7 @@ active = None
 music_player = None
 attempts = {}
 def load_audio():
-    settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8")) if SETTINGS_PATH.exists() else {}
-    return audio_settings(settings.get("audio"))
+    return audio_settings()
 
 
 AUDIO = load_audio()
@@ -530,19 +529,9 @@ async def update_volume(body: VolumeSettings, request: Request):
 
 @app.post("/api/settings/audio")
 async def update_audio_settings(body: AudioSettings, request: Request):
-    global AUDIO
     same_origin(request)
     authorize(request)
-    try:
-        settings = audio_settings(body.model_dump())
-    except ValueError as exc:
-        raise HTTPException(422, str(exc))
-    async with lock:
-        if active:
-            raise HTTPException(409, "Arrêtez la diffusion avant de modifier le buffer.")
-        save_settings(MULTICAST, ZONES, settings)
-        AUDIO = settings
-    return {"block_ms": AUDIO["block_ms"], "max_backlog_ms": AUDIO["max_backlog_ms"]}
+    raise HTTPException(410, "Le réglage du buffer a été retiré. Rechargez la page.")
 
 
 @app.post("/api/settings/network")
@@ -926,8 +915,6 @@ async def live(ws: WebSocket):
             env["PLAYER_AUDIO_MAX_BACKLOG_MS"] = str(AUDIO["max_backlog_ms"])
             process = await spawn(*command, stdin=asyncio.subprocess.PIPE,
                                                           stdout=asyncio.subprocess.DEVNULL, env=env)
-            process.stdin.transport.set_write_buffer_limits(high=AUDIO["max_backlog_bytes"],
-                                                           low=AUDIO["max_backlog_bytes"] // 2)
         elif CONFIG["mode"] != "simulation":
             raise ValueError("Mode audio inconnu.")
         await ws.send_json({"ready": True, "mode": CONFIG["mode"]})
